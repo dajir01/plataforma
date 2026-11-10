@@ -147,13 +147,15 @@ class AcreditacionController extends Controller
             ->where('id_feria', $idFeria)
             ->where('codigo_contrato', '>', 0)
             ->where('total_stands', '>', 0)
+            ->orderBy('id_contrato')
             ->get(['id_contrato', 'codigo_contrato', 'tipo_credenciales', 'nro_credenciales', 'stand_1', 'metraje_total']);
         $vinculaciones = EmpresaEventoCredencial::query()
             ->where('id_empresa', $empresa->id_empresa)
             ->where('id_feria', $idFeria)
             ->where('estado', true)
             ->whereIn('tipo_credencial', $tipos)
-            ->get(['id', 'id_contrato', 'tipo_credencial', 'cantidad_credenciales']);
+            ->orderBy('id')
+            ->get(['id', 'id_contrato', 'tipo_credencial', 'tipo_credenciales', 'cantidad_credenciales']);
 
         if ($contratos->isEmpty() && $vinculaciones->isEmpty()) {
             abort(404, 'El evento no pertenece a la empresa autenticada.');
@@ -182,8 +184,9 @@ class AcreditacionController extends Controller
             $adicionales = $movimientos
                 ->where('id_empresa_evento_credencial', $vinculacion->id)
                 ->whereNull('contrato')
-                ->where('tipo_movimiento', 'adicion')
-                ->sum('cant_adic');
+                ->sum(fn ($movimiento) => $movimiento->tipo_movimiento === 'disminucion'
+                    ? -(int) $movimiento->cant_adic
+                    : (int) $movimiento->cant_adic);
             $asignadas[$vinculacion->tipo_credencial] += (int) $vinculacion->cantidad_credenciales + (int) $adicionales;
         }
 
@@ -208,12 +211,12 @@ class AcreditacionController extends Controller
             $tipo = $vinculacionesPorContrato->get($contrato->id_contrato)?->tipo_credencial ?? $tipos->first();
             $usadas[$tipo] += (int) ($usadasPorContrato->get($contrato->id_contrato) ?? 0);
         }
-        foreach ($vinculaciones->whereNull('id_contrato') as $vinculacion) {
-            $codigo = match (mb_strtolower($vinculacion->tipo_credencial)) {
+        foreach ($vinculaciones->whereNull('id_contrato')->groupBy('tipo_credencial') as $tipo => $asignacionesDirectas) {
+            $codigo = match (mb_strtolower($tipo)) {
                 'expositor' => 1, 'prensa' => 2, 'oficial' => 3, 'servicios' => 4, 'negocios' => 5,
                 default => null,
             };
-            $usadas[$vinculacion->tipo_credencial] += (int) ($usadasDirectas->get($codigo) ?? 0);
+            $usadas[$tipo] += (int) ($usadasDirectas->get($codigo) ?? 0);
         }
 
         $acreditadosPorContrato = DB::table('credenciales as credencial')
@@ -276,7 +279,7 @@ class AcreditacionController extends Controller
                 ->keyBy('id_credencial')
             : collect();
 
-        $mapearAcreditado = function ($acreditado, ?int $modalidadBase = null) use ($descargasPorCredencial): array {
+        $mapearAcreditado = function ($acreditado, int|string|null $modalidadBase = null) use ($descargasPorCredencial, $idFeria): array {
             $modalidad = $acreditado->modalidad_credencial ?? $modalidadBase;
 
             return [
@@ -288,7 +291,7 @@ class AcreditacionController extends Controller
                 'email' => $acreditado->email ?: $acreditado->com_email,
                 'tipo_documento' => $acreditado->tipo_documento,
                 'foto' => $acreditado->foto,
-                'modalidad_credencial' => (int) ($modalidad ?? 1) === 1 ? 'Digital' : 'Física',
+                'modalidad_credencial' => $this->modalidadCredencialEvento($idFeria, $modalidad) === 1 ? 'Digital' : 'Física',
                 'estado_credencial_codigo' => (int) $acreditado->estado_credencial,
                 'estado_credencial' => match ((int) $acreditado->estado_credencial) {
                     1 => 'Activo', 2 => 'Anulado', 0 => 'Inhabilitado', default => 'Eliminado',
@@ -320,7 +323,7 @@ class AcreditacionController extends Controller
                 'stands' => $ubicacion ? [$ubicacion->numero_stand] : [],
                 'metraje_total' => (float) ($contrato->metraje_total ?? 0),
                 'tipo_credencial' => $tipo,
-                'modalidad_credencial' => (int) ($modalidad ?? 1) === 1 ? 'Digital' : 'Física',
+                'modalidad_credencial' => $this->modalidadCredencialEvento($idFeria, $modalidad) === 1 ? 'Digital' : 'Física',
                 'credenciales_asignadas' => max(0, $asignadasContrato + (int) $adicionalesContrato),
                 'credenciales_utilizadas' => $acreditados->count(),
                 'credenciales_disponibles' => max(0, $asignadasContrato + (int) $adicionalesContrato - $acreditados->count()),
@@ -328,30 +331,45 @@ class AcreditacionController extends Controller
             ]);
         }
 
-        foreach ($vinculaciones->whereNull('id_contrato') as $vinculacion) {
-            $tipoCodigo = match (mb_strtolower($vinculacion->tipo_credencial)) {
+        foreach ($vinculaciones->whereNull('id_contrato')->groupBy('tipo_credencial') as $tipo => $asignacionesDirectas) {
+            $tipoCodigo = match (mb_strtolower($tipo)) {
                 'expositor' => 1, 'prensa' => 2, 'oficial' => 3, 'servicios' => 4, 'negocios' => 5,
                 default => null,
             };
-            $acreditados = $acreditadosDirectosPorTipo->get($tipoCodigo, collect());
-            $adicionales = $movimientos
-                ->where('id_empresa_evento_credencial', $vinculacion->id)
-                ->whereNull('contrato')
-                ->where('tipo_movimiento', 'adicion')
-                ->sum('cant_adic');
-            $asignadasDirectas = (int) $vinculacion->cantidad_credenciales + (int) $adicionales;
+            $acreditadosTipo = $acreditadosDirectosPorTipo->get($tipoCodigo, collect())->values();
+            $indiceAcreditado = 0;
+            $usadasPendientes = $acreditadosTipo->count();
+            $ultimaAsignacion = $asignacionesDirectas->count() - 1;
 
-            $registros->push([
-                'id_contrato' => null,
-                'id_vinculacion' => (int) $vinculacion->id,
-                'codigo_contrato' => 'Sin contrato',
-                'tipo_credencial' => $vinculacion->tipo_credencial,
-                'modalidad_credencial' => (int) ($vinculacion->tipo_credenciales ?? 1) === 1 ? 'Digital' : 'Física',
-                'credenciales_asignadas' => max(0, $asignadasDirectas),
-                'credenciales_utilizadas' => $acreditados->count(),
-                'credenciales_disponibles' => max(0, $asignadasDirectas - $acreditados->count()),
-                'acreditados' => $acreditados->map(fn ($acreditado) => $mapearAcreditado($acreditado, (int) ($vinculacion->tipo_credenciales ?? 1)))->values(),
-            ]);
+            foreach ($asignacionesDirectas->values() as $indice => $vinculacion) {
+                $adicionales = $movimientos
+                    ->where('id_empresa_evento_credencial', $vinculacion->id)
+                    ->whereNull('contrato')
+                    ->sum(fn ($movimiento) => $movimiento->tipo_movimiento === 'disminucion'
+                        ? -(int) $movimiento->cant_adic
+                        : (int) $movimiento->cant_adic);
+                $asignadasDirectas = (int) $vinculacion->cantidad_credenciales + (int) $adicionales;
+                $usadasEnAsignacion = $indice === $ultimaAsignacion
+                    ? $usadasPendientes
+                    : min($usadasPendientes, max(0, $asignadasDirectas));
+                $acreditadosAsignacion = $acreditadosTipo->slice($indiceAcreditado, $usadasEnAsignacion);
+                $indiceAcreditado += $usadasEnAsignacion;
+                $usadasPendientes -= $usadasEnAsignacion;
+
+                $registros->push([
+                    'id_contrato' => null,
+                    'id_vinculacion' => (int) $vinculacion->id,
+                    'codigo_contrato' => 'Sin contrato',
+                    'tipo_credencial' => $tipo,
+                    'modalidad_credencial' => $this->modalidadCredencialEvento($idFeria, $vinculacion->tipo_credenciales) === 1 ? 'Digital' : 'Física',
+                    'credenciales_asignadas' => max(0, $asignadasDirectas),
+                    'credenciales_utilizadas' => $acreditadosAsignacion->count(),
+                    'credenciales_disponibles' => max(0, $asignadasDirectas - $acreditadosAsignacion->count()),
+                    'acreditados' => $acreditadosAsignacion
+                        ->map(fn ($acreditado) => $mapearAcreditado($acreditado, $vinculacion->tipo_credenciales))
+                        ->values(),
+                ]);
+            }
         }
 
         $resumen = $tipos->map(fn ($tipo) => [
@@ -440,12 +458,32 @@ class AcreditacionController extends Controller
                     'expositor' => 1, 'prensa' => 2, 'oficial' => 3, 'servicios' => 4, 'negocios' => 5,
                     default => throw ValidationException::withMessages(['tipo_credencial' => 'Tipo de credencial no reconocido.']),
                 };
-                $limite = (int) ($vinculacion->cantidad_credenciales ?? $contrato->nro_credenciales ?? 0);
-                $movimientos = DB::table('cred_adicionales')
-                    ->where('feria', $idFeria)
-                    ->where('id_empresa', $empresa->id_empresa)
-                    ->when($idContrato, fn ($query) => $query->where('contrato', $idContrato)->whereNull('id_empresa_evento_credencial'), fn ($query) => $query->whereNull('contrato')->where('id_empresa_evento_credencial', $vinculacion->id))
-                    ->get(['cant_adic', 'tipo_movimiento']);
+                if ($idContrato) {
+                    $limite = (int) ($vinculacion->cantidad_credenciales ?? $contrato->nro_credenciales ?? 0);
+                    $movimientos = DB::table('cred_adicionales')
+                        ->where('feria', $idFeria)
+                        ->where('id_empresa', $empresa->id_empresa)
+                        ->where('contrato', $idContrato)
+                        ->whereNull('id_empresa_evento_credencial')
+                        ->get(['cant_adic', 'tipo_movimiento']);
+                } else {
+                    $asignacionesDirectas = DB::table('empresa_evento_credenciales')
+                        ->where('id_empresa', $empresa->id_empresa)
+                        ->where('id_feria', $idFeria)
+                        ->where('tipo_credencial', $tipo)
+                        ->where('estado', true)
+                        ->whereNull('id_contrato')
+                        ->lockForUpdate()
+                        ->get(['id', 'cantidad_credenciales']);
+                    $idsAsignacionesDirectas = $asignacionesDirectas->pluck('id');
+                    $limite = (int) $asignacionesDirectas->sum('cantidad_credenciales');
+                    $movimientos = DB::table('cred_adicionales')
+                        ->where('feria', $idFeria)
+                        ->where('id_empresa', $empresa->id_empresa)
+                        ->whereNull('contrato')
+                        ->whereIn('id_empresa_evento_credencial', $idsAsignacionesDirectas)
+                        ->get(['cant_adic', 'tipo_movimiento']);
+                }
                 $limite += $movimientos->sum(fn ($movimiento) => $movimiento->tipo_movimiento === 'disminucion' ? -(int) $movimiento->cant_adic : (int) $movimiento->cant_adic);
                 $usadas = DB::table('credenciales')->where('id_empresa', $empresa->id_empresa)->where('id_feria', $idFeria)->when($idContrato, fn ($query) => $query->where('id_contrato', $idContrato), fn ($query) => $query->whereNull('id_contrato'))->where('tipo_credencial', $tipoCodigo)->where('estado_credencial', '!=', 3)->count();
                 if ($usadas >= $limite) {
@@ -454,6 +492,7 @@ class AcreditacionController extends Controller
 
                 $ci = trim($datos['ci']);
                 $expositor = DB::table('expositores')->where('ci', $ci)->lockForUpdate()->first();
+                $foto = $datos['foto'] ?? null;
                 if ($expositor) {
                     $yaAcreditado = DB::table('credenciales')->where('id_expositor', $expositor->id_exp)->where('id_feria', $idFeria)->where('estado_credencial', '!=', 3)->exists();
                     if ($yaAcreditado) {
@@ -462,15 +501,13 @@ class AcreditacionController extends Controller
                     $idExpositor = (int) $expositor->id_exp;
                     DB::table('expositores')->where('id_exp', $idExpositor)->update(['tipo_documento' => $datos['tipo_documento'], 'nombre' => trim($datos['nombre']), 'email' => $datos['email'] ?? null, 'celular' => $datos['celular'] ?? null, 'updated_at' => now()]);
                 } else {
-                    if (! $datos['foto']) {
+                    if (! $foto) {
                         throw ValidationException::withMessages(['foto' => 'La fotografía es obligatoria para un expositor nuevo.']);
                     }
                     $idExpositor = DB::table('expositores')->insertGetId(['ci' => $ci, 'tipo_documento' => $datos['tipo_documento'], 'nombre' => trim($datos['nombre']), 'email' => $datos['email'] ?? null, 'celular' => $datos['celular'] ?? null, 'estado' => true, 'created_at' => now(), 'updated_at' => now()]);
                 }
-
                 $rutaFoto = $expositor?->foto;
-                if ($datos['foto']) {
-                    $foto = $datos['foto'];
+                if ($foto) {
                     $nombreFoto = 'acreditado_'.Str::uuid().'.'.$foto->extension();
                     $rutaAlmacenada = Storage::disk('acreditados')->putFileAs('', $foto, $nombreFoto);
                     if (! $rutaAlmacenada) {
@@ -481,7 +518,8 @@ class AcreditacionController extends Controller
                     DB::table('expositores')->where('id_exp', $idExpositor)->update(['foto' => $rutaFoto]);
                 }
 
-                $idCredencial = DB::table('credenciales')->insertGetId(['cod_credencial' => 'ACR-'.$idFeria.'-'.($idContrato ?? 'D').'-'.$idExpositor.'-'.now()->format('YmdHis'), 'id_expositor' => $idExpositor, 'id_contrato' => $idContrato, 'id_empresa' => $empresa->id_empresa, 'id_feria' => $idFeria, 'com_medio' => '', 'com_dias' => '', 'tipo_credencial' => $tipoCodigo, 'modalidad_credencial' => (int) ($vinculacion->tipo_credenciales ?? $contrato->tipo_credenciales ?? 1), 'estado_credencial' => 1, 'ingreso' => 0, 'created_at' => now(), 'updated_at' => now()]);
+                $modalidad = $this->modalidadCredencialEvento($idFeria, $vinculacion->tipo_credenciales ?? $contrato->tipo_credenciales ?? null);
+                $idCredencial = DB::table('credenciales')->insertGetId(['cod_credencial' => 'ACR-'.$idFeria.'-'.($idContrato ?? 'D').'-'.$idExpositor.'-'.now()->format('YmdHis'), 'id_expositor' => $idExpositor, 'id_contrato' => $idContrato, 'id_empresa' => $empresa->id_empresa, 'id_feria' => $idFeria, 'com_medio' => '', 'com_dias' => '', 'tipo_credencial' => $tipoCodigo, 'modalidad_credencial' => $modalidad, 'estado_credencial' => 1, 'ingreso' => 0, 'created_at' => now(), 'updated_at' => now()]);
 
                 return ['id_expositor' => $idExpositor, 'id_credencial' => $idCredencial, 'foto' => $rutaFoto];
             });
@@ -601,6 +639,7 @@ class AcreditacionController extends Controller
         $acreditados = collect($datos['credenciales'])->map(fn (int $id) => $this->credencialAutorizada($id));
         $errores = [];
         $encoladas = 0;
+        $credencialesEnviadas = [];
 
         foreach ($acreditados as $acreditado) {
             if ((int) ($acreditado->modalidad_credencial ?? 1) !== 1) {
@@ -626,6 +665,7 @@ class AcreditacionController extends Controller
                     base64_encode($imagen),
                 );
                 $encoladas++;
+                $credencialesEnviadas[] = (int) $acreditado->id_credencial;
             } catch (\Throwable $exception) {
                 report($exception);
                 $errores[] = "No se pudo preparar la credencial de {$acreditado->nombre}.";
@@ -640,6 +680,7 @@ class AcreditacionController extends Controller
             'success' => true,
             'message' => "Se encolaron {$encoladas} credenciales digitales para envío por correo electrónico.".($errores ? ' Pendientes: '.implode(' ', $errores) : ''),
             'encoladas' => $encoladas,
+            'credenciales_enviadas' => $credencialesEnviadas,
             'pendientes' => $errores,
         ]);
     }
@@ -677,7 +718,17 @@ class AcreditacionController extends Controller
             abort(404, 'La credencial no pertenece a la empresa autenticada.');
         }
 
+        $acreditado->modalidad_credencial = $this->modalidadCredencialEvento(
+            (int) $acreditado->id_feria,
+            $acreditado->modalidad_credencial
+        );
+
         return $acreditado;
+    }
+
+    private function modalidadCredencialEvento(int $idFeria, int|string|null $modalidad): int
+    {
+        return $idFeria === 19 ? 1 : (int) ($modalidad ?? 1);
     }
 
     private function registrarDescarga(int $id, string $tipo): void
@@ -837,11 +888,32 @@ class AcreditacionController extends Controller
 
     private function crearFotoCircularImagen(?string $foto, array &$temporales): ?string
     {
-        $ruta = $foto ? base_path('../intranetfexco/public/'.ltrim($foto, '/')) : null;
-        if (! $ruta || ! File::exists($ruta) || ! function_exists('imagecreatefromstring')) {
+        if (! $foto || ! function_exists('imagecreatefromstring')) {
             return null;
         }
-        $origen = @imagecreatefromstring((string) file_get_contents($ruta));
+        $rutaRelativa = str_replace('\\', '/', ltrim($foto, '/'));
+        if (! str_starts_with($rutaRelativa, 'images/fotos/')) {
+            return null;
+        }
+
+        $nombreArchivo = basename($rutaRelativa);
+        if (! preg_match('/^[A-Za-z0-9_-]+\.(?:jpg|jpeg|png)$/i', $nombreArchivo)) {
+            return null;
+        }
+
+        $contenido = null;
+        foreach (['acreditados', 'acreditados_legacy'] as $nombreDisco) {
+            $disco = Storage::disk($nombreDisco);
+            if ($disco->exists($nombreArchivo)) {
+                $contenido = $disco->get($nombreArchivo);
+                break;
+            }
+        }
+        if ($contenido === null) {
+            return null;
+        }
+
+        $origen = @imagecreatefromstring($contenido);
         if (! $origen) {
             return null;
         }

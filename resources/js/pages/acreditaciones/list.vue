@@ -207,7 +207,7 @@ const todosSeleccionados = tipo => {
 
 const seleccionParcial = tipo => {
   const digitales = acreditadosFiltrados(tipo).filter(esDigital)
-  const seleccionados = seleccionadosDeTipo(tipo).length
+  const seleccionados = digitales.filter(acreditado => credencialesSeleccionadas.value.includes(acreditado.id_credencial)).length
 
   return seleccionados > 0 && seleccionados < digitales.length
 }
@@ -335,7 +335,9 @@ const enviarSeleccionadas = async tipo => {
     mensaje.value = payload.message || 'Las credenciales fueron enviadas correctamente.'
     mostrarMensaje.value = true
 
-    credencialesSeleccionadas.value = credencialesSeleccionadas.value.filter(id => !seleccionadas.includes(id))
+    const enviadas = payload.credenciales_enviadas || []
+
+    credencialesSeleccionadas.value = credencialesSeleccionadas.value.filter(id => !enviadas.includes(id))
   } catch (exception) {
     error.value = exception.message
   }
@@ -414,11 +416,13 @@ const seleccionarFoto = event => {
   if (!archivo) return
   if (!['image/jpeg', 'image/png'].includes(archivo.type) || archivo.size > 2 * 1024 * 1024) {
     errorFormulario.value = 'Seleccione una imagen JPG o PNG de máximo 2 MB.'
-    
+    event.target.value = ''
+
     return
   }
   if (previewFoto.value.startsWith('blob:'))
     URL.revokeObjectURL(previewFoto.value)
+  errorFormulario.value = ''
   archivoFoto.value = archivo
   formulario.value.foto = archivo
   previewFoto.value = URL.createObjectURL(archivo)
