@@ -13,8 +13,8 @@ import vuetify from 'vite-plugin-vuetify'
 import svgLoader from 'vite-svg-loader'
 
 // https://vitejs.dev/config/
-export default defineConfig({
-  base: mode === 'production' ? '/build/' : '/',
+export default defineConfig(({ mode }) => ({
+  base: mode === 'production' ? '/assets/' : '/',
   plugins: [// Docs: https://github.com/posva/unplugin-vue-router
   // ℹ️ This plugin should be placed before vue plugin
     VueRouter({
@@ -42,6 +42,7 @@ export default defineConfig({
     laravel({
       input: ['resources/js/main.js'],
       refresh: true,
+      buildDirectory: 'assets',
     }),
     vueJsx(), // Docs: https://github.com/vuetifyjs/vuetify-loader/tree/master/packages/vite-plugin
     vuetify({
@@ -100,6 +101,7 @@ export default defineConfig({
     },
   },
   build: {
+    assetsDir: '',
     chunkSizeWarningLimit: 5000,
   },
   optimizeDeps: {
@@ -108,4 +110,4 @@ export default defineConfig({
       './resources/js/**/*.vue',
     ],
   },
-})
+}))

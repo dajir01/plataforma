@@ -42,7 +42,7 @@ No compartas ni guardes archivos `.env` con credenciales en el repositorio.
    composer run dev
    ```
 
-Para producción, compila los recursos con `npm run build` y ejecuta un worker persistente para procesar los envíos de correo.
+Para producción, compila los recursos con `npm run build` y ejecuta un worker persistente para procesar los envíos de correo. Los archivos compilados se generan en `public/assets` y se sirven desde `/assets/` (sin el segmento `/build/`); el document root del servidor debe apuntar a `public`.
 
 ## Módulos principales
 
