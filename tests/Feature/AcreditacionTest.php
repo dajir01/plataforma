@@ -40,6 +40,7 @@ class AcreditacionTest extends TestCase
             $table->date('inicio')->nullable();
             $table->date('fecha_inicio')->nullable();
             $table->date('fecha_fin')->nullable();
+            $table->boolean('acreditacion_empresa_habilitada')->default(false);
         });
         Schema::create('contrato', function (Blueprint $table) {
             $table->increments('id_contrato');
@@ -119,6 +120,7 @@ class AcreditacionTest extends TestCase
             'codigo_contrato' => 'FEX',
             'tipo_credenciales' => 'Expositor',
             'fecha_fin' => today()->addDay()->toDateString(),
+            'acreditacion_empresa_habilitada' => true,
         ]);
         DB::table('empresa_evento_credenciales')->insert([
             [
@@ -220,6 +222,7 @@ class AcreditacionTest extends TestCase
             'codigo_contrato' => 'FEX',
             'tipo_credenciales' => 'Expositor',
             'fecha_fin' => today()->addDay()->toDateString(),
+            'acreditacion_empresa_habilitada' => true,
         ]);
         DB::table('contrato')->insert([
             [
@@ -277,5 +280,59 @@ class AcreditacionTest extends TestCase
             1,
             (int) DB::table('credenciales')->where('id_feria', 19)->where('id_contrato', 20)->value('modalidad_credencial')
         );
+    }
+
+    public function test_accreditation_event_list_only_includes_events_enabled_by_intranet(): void
+    {
+        DB::table('eventos')->insert([
+            'id_feria' => 11,
+            'nombre_feria' => 'Evento cerrado',
+            'codigo_contrato' => 'FEX',
+            'tipo_credenciales' => 'Expositor',
+            'fecha_fin' => today()->addDay()->toDateString(),
+            'acreditacion_empresa_habilitada' => false,
+        ]);
+        DB::table('empresa_evento_credenciales')->insert([
+            'id' => 11,
+            'id_empresa' => 1,
+            'id_feria' => 11,
+            'tipo_credencial' => 'Expositor',
+            'tipo_credenciales' => 2,
+            'cantidad_credenciales' => 2,
+            'estado' => true,
+        ]);
+        DB::table('contrato')->insert([
+            'id_contrato' => 11,
+            'id_feria' => 11,
+            'id_empresa' => 1,
+            'codigo_contrato' => 11,
+            'total_stands' => 1,
+            'nro_credenciales' => 2,
+            'tipo_credenciales' => 2,
+        ]);
+
+        $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->getJson('/acreditaciones/eventos')
+            ->assertOk()
+            ->assertJsonCount(1, 'data')
+            ->assertJsonPath('data.0.id_feria', 10);
+    }
+
+    public function test_company_cannot_create_accreditations_for_a_closed_event(): void
+    {
+        DB::table('eventos')->where('id_feria', 10)->update(['acreditacion_empresa_habilitada' => false]);
+
+        $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->postJson('/acreditaciones/eventos/10/acreditados', [
+                'id_contrato' => 10,
+                'tipo_credencial' => 'Expositor',
+                'ci' => '67890',
+                'tipo_documento' => 'Cédula de identidad',
+                'nombre' => 'Persona nueva',
+            ])
+            ->assertUnprocessable()
+            ->assertJsonValidationErrors(['evento']);
+
+        $this->assertSame(1, DB::table('credenciales')->where('id_feria', 10)->count());
     }
 }

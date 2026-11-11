@@ -103,7 +103,7 @@ class AcreditacionController extends Controller
             return response()->json(['message' => 'La sesión no es válida.'], 401);
         }
 
-        $eventos = $this->empresaEventoAccess->eventosDisponibles($empresa)
+        $eventos = $this->empresaEventoAccess->eventosConAcreditacionHabilitada($empresa)
             ->select('eventos.id_feria', 'eventos.nombre_feria', 'eventos.codigo_contrato', 'eventos.fecha_inicio', 'eventos.fecha_fin')
             ->orderByRaw('COALESCE(eventos.fecha_inicio, eventos.inicio) ASC')
             ->orderBy('eventos.id_feria')
@@ -418,6 +418,9 @@ class AcreditacionController extends Controller
                 $feria = Feria::query()->lockForUpdate()->findOrFail($idFeria);
                 if ($feria->fecha_fin && $feria->fecha_fin < today()->toDateString()) {
                     throw ValidationException::withMessages(['evento' => 'El evento ya finalizó.']);
+                }
+                if (! $feria->acreditacion_empresa_habilitada) {
+                    throw ValidationException::withMessages(['evento' => 'Las acreditaciones para este evento están cerradas.']);
                 }
 
                 $tipo = trim($datos['tipo_credencial']);

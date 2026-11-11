@@ -35,6 +35,12 @@ class EmpresaEventoAccess
             });
     }
 
+    public function eventosConAcreditacionHabilitada(Empresa $empresa): Builder
+    {
+        return $this->eventosDisponibles($empresa)
+            ->where('eventos.acreditacion_empresa_habilitada', true);
+    }
+
     public function puedeAcceder(Empresa $empresa, int $idFeria): bool
     {
         return $this->eventosDisponibles($empresa)
