@@ -87,7 +87,35 @@ const asignacionesDisponibles = computed(() => (tipoSeleccionado.value?.registro
       : `${registro.codigo_contrato} · ${registro.credenciales_disponibles} disponibles`,
   })))
 
-const tiposVisibles = computed(() => tipos.value.filter(tipo => tipo.registros?.length))
+const tiposVisibles = computed(() => tipos.value.flatMap(tipo => {
+  const registrosContrato = (tipo.registros || []).filter(registro => registro.id_contrato)
+  const registrosDirectos = (tipo.registros || []).filter(registro => !registro.id_contrato)
+  const secciones = []
+
+  if (registrosContrato.length) {
+    secciones.push({
+      ...tipo,
+      clave: `${tipo.tipo}:contratos`,
+      registros: registrosContrato,
+      asignadas: registrosContrato.reduce((total, registro) => total + Number(registro.credenciales_asignadas || 0), 0),
+      utilizadas: registrosContrato.reduce((total, registro) => total + Number(registro.credenciales_utilizadas || 0), 0),
+      disponibles: registrosContrato.reduce((total, registro) => total + Number(registro.credenciales_disponibles || 0), 0),
+    })
+  }
+
+  registrosDirectos.forEach(registro => {
+    secciones.push({
+      ...tipo,
+      clave: `${tipo.tipo}:vinculacion:${registro.id_vinculacion}`,
+      registros: [registro],
+      asignadas: Number(registro.credenciales_asignadas || 0),
+      utilizadas: Number(registro.credenciales_utilizadas || 0),
+      disponibles: Number(registro.credenciales_disponibles || 0),
+    })
+  })
+
+  return secciones
+}))
 const sinEventos = computed(() => !loadingEventos.value && eventos.value.length === 0)
 const sinCredenciales = computed(() => !loadingResumen.value && Boolean(eventoSeleccionado.value) && tiposVisibles.value.length === 0)
 const hayCredencialesFisicas = computed(() => tipos.value.some(tipo => tipo.registros?.some(registro => String(registro.modalidad_credencial || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').startsWith('fis'))))
@@ -147,7 +175,8 @@ const cargarResumen = async (idFeria, mostrarCarga = true) => {
     tipos.value = payload?.data?.tipos || []
     if (mostrarCarga) {
       paginasTipo.value = {}
-      tiposAbiertos.value = tiposVisibles.value.map(tipo => tipo.tipo)
+      busqueda.value = {}
+      tiposAbiertos.value = tiposVisibles.value.map(tipo => tipo.clave)
       credencialesSeleccionadas.value = []
     }
   } catch (exception) {
@@ -184,20 +213,24 @@ const alternarTipo = tipo => {
 }
 
 const acreditadosFiltrados = tipo => {
-  const termino = String(busqueda.value[tipo.tipo] || '').trim().toLowerCase()
+  const termino = String(busqueda.value[tipo.clave] || '').trim().toLowerCase()
   const lista = tipo.registros.flatMap(registro => registro.acreditados || [])
   
   return termino ? lista.filter(item => [item.nombre, item.ci].some(valor => String(valor || '').toLowerCase().includes(termino))) : lista
 }
 
 const acreditadosPaginados = tipo => {
-  const inicio = ((paginasTipo.value[tipo.tipo] || 1) - 1) * elementosPorPagina.value
+  const inicio = ((paginasTipo.value[tipo.clave] || 1) - 1) * elementosPorPagina.value
   
   return acreditadosFiltrados(tipo).slice(inicio, inicio + elementosPorPagina.value)
 }
 
 const totalPaginas = tipo => Math.max(1, Math.ceil(acreditadosFiltrados(tipo).length / elementosPorPagina.value))
 const tipoColor = tipo => ({ Expositor: 'success', Oficial: 'info', Prensa: 'secondary', Servicios: 'warning', Negocios: 'primary' }[tipo] || 'primary')
+const actualizarBusqueda = (clave, valor) => {
+  busqueda.value = { ...busqueda.value, [clave]: valor }
+  paginasTipo.value = { ...paginasTipo.value, [clave]: 1 }
+}
 
 const urlFoto = foto => {
   if (!foto)
@@ -765,7 +798,7 @@ onBeforeUnmount(() => {
       <VCard
         v-for="tipo in tiposVisibles"
         v-else
-        :key="tipo.tipo"
+        :key="tipo.clave"
         class="mb-4"
       >
         <VCardText class="pa-4">
@@ -774,9 +807,9 @@ onBeforeUnmount(() => {
               icon
               size="small"
               variant="text"
-              @click="alternarTipo(tipo.tipo)"
+              @click="alternarTipo(tipo.clave)"
             >
-              <VIcon :icon="tipoAbierto(tipo.tipo) ? 'tabler-chevron-up' : 'tabler-chevron-down'" />
+              <VIcon :icon="tipoAbierto(tipo.clave) ? 'tabler-chevron-up' : 'tabler-chevron-down'" />
             </VBtn><div class="grow">
               <div class="d-flex align-center gap-2 flex-wrap">
                 <VChip
@@ -785,7 +818,7 @@ onBeforeUnmount(() => {
                   label
                 >
                   {{ tipo.tipo }}
-                </VChip><span class="text-body-1 font-weight-medium">{{ tipo.registros.length === 1 ? tipo.registros[0].codigo_contrato : `${tipo.registros.length} contratos` }}</span><VChip
+                </VChip><span class="text-body-1 font-weight-medium">{{ tipo.registros.length === 1 ? (tipo.registros[0].id_contrato ? `Contrato ${tipo.registros[0].codigo_contrato}` : 'Sin contrato') : `${tipo.registros.length} contratos` }}</span><VChip
                   v-if="tipo.registros.length === 1"
                   size="small"
                   variant="tonal"
@@ -800,17 +833,30 @@ onBeforeUnmount(() => {
                 class="mt-1 text-caption text-disabled"
               >
                 {{ tipo.registros[0].pabellon || 'Sin pabellón' }} | Stand: {{ tipo.registros[0].stands?.join(', ') || 'Sin stand' }}<span v-if="tipo.registros[0].metraje_total"> | {{ tipo.registros[0].metraje_total }} m²</span>
+              </div><div
+                v-if="tipo.registros.length > 1"
+                class="d-flex flex-wrap gap-2 mt-2"
+              >
+                <VChip
+                  v-for="registro in tipo.registros"
+                  :key="registro.id_contrato ? `contrato-${registro.id_contrato}` : `vinculacion-${registro.id_vinculacion}`"
+                  size="x-small"
+                  variant="tonal"
+                  :color="registro.id_contrato ? 'info' : 'warning'"
+                >
+                  {{ registro.id_contrato ? `Contrato ${registro.codigo_contrato}` : 'Sin contrato' }} · {{ registro.credenciales_asignadas }} asignadas
+                </VChip>
               </div>
             </div><div class="d-flex align-center gap-3 ms-auto acreditacion-acciones">
               <AppTextField
-                :model-value="busqueda[tipo.tipo] || ''"
+                :model-value="busqueda[tipo.clave] || ''"
                 placeholder="Buscar por nombre o CI..."
                 append-inner-icon="tabler-search"
                 single-line
                 clearable
                 hide-details
                 class="acreditados-tipo-buscador"
-                @update:model-value="actualizarBusqueda(tipo.tipo, $event)"
+                @update:model-value="actualizarBusqueda(tipo.clave, $event)"
               /><VBtn
                 v-if="tipoTieneDisponibles(tipo)"
                 color="primary"
@@ -823,7 +869,7 @@ onBeforeUnmount(() => {
           </div>
         </VCardText>
         <VExpandTransition>
-          <div v-if="tipoAbierto(tipo.tipo)">
+          <div v-if="tipoAbierto(tipo.clave)">
             <VDivider />
             <div
               v-if="seleccionadosDeTipo(tipo).length"
@@ -991,7 +1037,7 @@ onBeforeUnmount(() => {
               class="d-flex align-center justify-space-between pa-4"
             >
               <span class="text-body-2 text-medium-emphasis">Elementos por página: {{ elementosPorPagina }}</span><VPagination
-                v-model="paginasTipo[tipo.tipo]"
+                v-model="paginasTipo[tipo.clave]"
                 :length="totalPaginas(tipo)"
                 :total-visible="5"
                 density="comfortable"

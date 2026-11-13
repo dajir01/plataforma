@@ -49,7 +49,9 @@ class EmpresaAuthenticationTest extends TestCase
             $table->increments('id');
             $table->unsignedInteger('id_empresa');
             $table->unsignedInteger('id_feria');
+            $table->unsignedInteger('id_contrato')->nullable();
             $table->boolean('estado');
+            $table->boolean('visible_en_plataforma')->default(true);
         });
     }
 

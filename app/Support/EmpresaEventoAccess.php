@@ -30,7 +30,11 @@ class EmpresaEventoAccess
                         ->from('empresa_evento_credenciales')
                         ->whereColumn('empresa_evento_credenciales.id_feria', 'eventos.id_feria')
                         ->where('empresa_evento_credenciales.id_empresa', $empresa->id_empresa)
-                        ->where('empresa_evento_credenciales.estado', true);
+                        ->where('empresa_evento_credenciales.estado', true)
+                        ->where(function ($query) {
+                            $query->whereNotNull('empresa_evento_credenciales.id_contrato')
+                                ->orWhere('empresa_evento_credenciales.visible_en_plataforma', true);
+                        });
                 });
             });
     }

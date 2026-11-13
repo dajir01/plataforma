@@ -165,6 +165,10 @@ class AcreditacionController extends Controller
             ->where('id_feria', $idFeria)
             ->where('estado', true)
             ->whereIn('tipo_credencial', $tipos)
+            ->where(function ($query) {
+                $query->whereNotNull('id_contrato')
+                    ->orWhere('visible_en_plataforma', true);
+            })
             ->orderBy('id')
             ->get(['id', 'id_contrato', 'tipo_credencial', 'tipo_credenciales', 'cantidad_credenciales']);
 
@@ -173,62 +177,17 @@ class AcreditacionController extends Controller
         }
 
         $vinculacionesPorContrato = $vinculaciones->whereNotNull('id_contrato')->keyBy('id_contrato');
+        $contratoIds = $contratos->pluck('id_contrato');
         $movimientos = DB::table('cred_adicionales')
             ->where('feria', $idFeria)
-            ->where('id_empresa', $empresa->id_empresa)
+            ->where(function ($query) use ($empresa, $contratoIds) {
+                $query->where('id_empresa', $empresa->id_empresa)
+                    ->orWhere(function ($query) use ($contratoIds) {
+                        $query->whereNull('id_empresa')
+                            ->whereIn('contrato', $contratoIds);
+                    });
+            })
             ->get(['contrato', 'id_empresa_evento_credencial', 'cant_adic', 'tipo_movimiento']);
-        $asignadas = $tipos->mapWithKeys(fn ($tipo) => [$tipo => 0]);
-
-        foreach ($contratos as $contrato) {
-            $vinculacion = $vinculacionesPorContrato->get($contrato->id_contrato);
-            $tipo = $vinculacion?->tipo_credencial ?? $tipos->first();
-            $adicionales = $movimientos
-                ->where('contrato', $contrato->id_contrato)
-                ->whereNull('id_empresa_evento_credencial')
-                ->sum(fn ($movimiento) => $movimiento->tipo_movimiento === 'disminucion'
-                    ? -(int) $movimiento->cant_adic
-                    : (int) $movimiento->cant_adic);
-            $asignadas[$tipo] += (int) ($vinculacion?->cantidad_credenciales ?? $contrato->nro_credenciales ?? 0) + $adicionales;
-        }
-
-        foreach ($vinculaciones->whereNull('id_contrato') as $vinculacion) {
-            $adicionales = $movimientos
-                ->where('id_empresa_evento_credencial', $vinculacion->id)
-                ->whereNull('contrato')
-                ->sum(fn ($movimiento) => $movimiento->tipo_movimiento === 'disminucion'
-                    ? -(int) $movimiento->cant_adic
-                    : (int) $movimiento->cant_adic);
-            $asignadas[$vinculacion->tipo_credencial] += (int) $vinculacion->cantidad_credenciales + (int) $adicionales;
-        }
-
-        $contratoIds = $contratos->pluck('id_contrato');
-        $usadasPorContrato = DB::table('credenciales')
-            ->whereIn('id_contrato', $contratoIds)
-            ->where('estado_credencial', '!=', 3)
-            ->select('id_contrato', DB::raw('COUNT(*) as total'))
-            ->groupBy('id_contrato')
-            ->pluck('total', 'id_contrato');
-        $usadasDirectas = DB::table('credenciales')
-            ->where('id_empresa', $empresa->id_empresa)
-            ->where('id_feria', $idFeria)
-            ->whereNull('id_contrato')
-            ->where('estado_credencial', '!=', 3)
-            ->select('tipo_credencial', DB::raw('COUNT(*) as total'))
-            ->groupBy('tipo_credencial')
-            ->pluck('total', 'tipo_credencial');
-        $usadas = $tipos->mapWithKeys(fn ($tipo) => [$tipo => 0]);
-
-        foreach ($contratos as $contrato) {
-            $tipo = $vinculacionesPorContrato->get($contrato->id_contrato)?->tipo_credencial ?? $tipos->first();
-            $usadas[$tipo] += (int) ($usadasPorContrato->get($contrato->id_contrato) ?? 0);
-        }
-        foreach ($vinculaciones->whereNull('id_contrato')->groupBy('tipo_credencial') as $tipo => $asignacionesDirectas) {
-            $codigo = match (mb_strtolower($tipo)) {
-                'expositor' => 1, 'prensa' => 2, 'oficial' => 3, 'servicios' => 4, 'negocios' => 5,
-                default => null,
-            };
-            $usadas[$tipo] += (int) ($usadasDirectas->get($codigo) ?? 0);
-        }
 
         $acreditadosPorContrato = DB::table('credenciales as credencial')
             ->join('expositores as expositor', 'expositor.id_exp', '=', 'credencial.id_expositor')
@@ -319,7 +278,6 @@ class AcreditacionController extends Controller
             $asignadasContrato = (int) ($vinculacion?->cantidad_credenciales ?? $contrato->nro_credenciales ?? 0);
             $adicionalesContrato = $movimientos
                 ->where('contrato', $contrato->id_contrato)
-                ->whereNull('id_empresa_evento_credencial')
                 ->sum(fn ($movimiento) => $movimiento->tipo_movimiento === 'disminucion'
                     ? -(int) $movimiento->cant_adic
                     : (int) $movimiento->cant_adic);
@@ -383,13 +341,17 @@ class AcreditacionController extends Controller
             }
         }
 
-        $resumen = $tipos->map(fn ($tipo) => [
-            'tipo' => $tipo,
-            'asignadas' => max(0, (int) $asignadas[$tipo]),
-            'utilizadas' => (int) $usadas[$tipo],
-            'disponibles' => max(0, (int) $asignadas[$tipo] - (int) $usadas[$tipo]),
-            'registros' => $registros->where('tipo_credencial', $tipo)->values(),
-        ])->values();
+        $resumen = $tipos->map(function ($tipo) use ($registros) {
+            $registrosTipo = $registros->where('tipo_credencial', $tipo);
+
+            return [
+                'tipo' => $tipo,
+                'asignadas' => max(0, (int) $registrosTipo->sum('credenciales_asignadas')),
+                'utilizadas' => (int) $registrosTipo->sum('credenciales_utilizadas'),
+                'disponibles' => max(0, (int) $registrosTipo->sum('credenciales_disponibles')),
+                'registros' => $registrosTipo->values(),
+            ];
+        })->values();
 
         return response()->json([
             'success' => true,
@@ -478,6 +440,7 @@ class AcreditacionController extends Controller
                     ->where('id_feria', $idFeria)
                     ->where('tipo_credencial', $tipo)
                     ->where('estado', true)
+                    ->when(! $idContrato, fn ($query) => $query->where('visible_en_plataforma', true))
                     ->when($idContrato, fn ($query) => $query->where('id_contrato', $idContrato), fn ($query) => $query->whereNull('id_contrato'));
                 if ($idVinculacion) {
                     $vinculacionQuery->where('id', $idVinculacion);
@@ -510,6 +473,7 @@ class AcreditacionController extends Controller
                         ->where('id_feria', $idFeria)
                         ->where('tipo_credencial', $tipo)
                         ->where('estado', true)
+                        ->where('visible_en_plataforma', true)
                         ->whereNull('id_contrato')
                         ->lockForUpdate()
                         ->get(['id', 'cantidad_credenciales']);
