@@ -6,6 +6,7 @@ use App\Jobs\EnviarCredencialDigitalJob;
 use App\Models\EmpresaEventoCredencial;
 use App\Models\Feria;
 use App\Support\EmpresaEventoAccess;
+use App\Support\RegistrarDescargaCredencial;
 use chillerlan\QRCode\Output\QROutputInterface;
 use chillerlan\QRCode\QRCode;
 use chillerlan\QRCode\QROptions;
@@ -24,7 +25,10 @@ use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class AcreditacionController extends Controller
 {
-    public function __construct(private readonly EmpresaEventoAccess $empresaEventoAccess) {}
+    public function __construct(
+        private readonly EmpresaEventoAccess $empresaEventoAccess,
+        private readonly RegistrarDescargaCredencial $registrarDescargaCredencial
+    ) {}
 
     public function buscarExpositor(Request $request): JsonResponse
     {
@@ -683,6 +687,9 @@ class AcreditacionController extends Controller
             'credenciales' => ['required', 'array', 'min:1', 'max:100'],
             'credenciales.*' => ['integer', 'distinct'],
         ]);
+        $empresa = Auth::guard('empresa')->user();
+        abort_unless($empresa, 401);
+
         $acreditados = collect($datos['credenciales'])->map(fn (int $id) => $this->credencialAutorizada($id));
         $errores = [];
         $encoladas = 0;
@@ -710,6 +717,9 @@ class AcreditacionController extends Controller
                     (string) $acreditado->nombre,
                     (string) $acreditado->nombre_feria,
                     base64_encode($imagen),
+                    null,
+                    (int) $empresa->id_empresa,
+                    (string) $empresa->usuario,
                 );
                 $encoladas++;
                 $credencialesEnviadas[] = (int) $acreditado->id_credencial;
@@ -780,9 +790,15 @@ class AcreditacionController extends Controller
 
     private function registrarDescarga(int $id, string $tipo): void
     {
-        if (Schema::hasTable('credencial_digital_descargas')) {
-            DB::table('credencial_digital_descargas')->insert(['id_credencial' => $id, 'tipo_descarga' => $tipo, 'created_at' => now()]);
-        }
+        $empresa = Auth::guard('empresa')->user();
+        abort_unless($empresa, 401);
+
+        $this->registrarDescargaCredencial->registrar(
+            $id,
+            $tipo,
+            idEmpresa: (int) $empresa->id_empresa,
+            usuarioEmpresa: $empresa->usuario
+        );
     }
 
     private function generarImagen(object $acreditado): string

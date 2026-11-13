@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\Empresa;
+use App\Support\RegistrarDescargaCredencial;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -104,6 +105,15 @@ class AcreditacionTest extends TestCase
             $table->integer('ingreso')->nullable();
             $table->timestamps();
         });
+        Schema::create('credencial_digital_descargas', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedInteger('id_credencial');
+            $table->unsignedInteger('id_usuario')->nullable();
+            $table->bigInteger('id_empresa')->nullable();
+            $table->text('usuario_empresa')->nullable();
+            $table->string('tipo_descarga', 20);
+            $table->timestamp('created_at');
+        });
         Schema::create('stands', function (Blueprint $table) {
             $table->increments('id_stand');
             $table->unsignedInteger('id_pabellon')->nullable();
@@ -201,6 +211,24 @@ class AcreditacionTest extends TestCase
             ->assertJsonPath('data.tipos.0.registros.1.credenciales_disponibles', 1)
             ->assertJsonCount(1, 'data.tipos.0.registros.0.acreditados')
             ->assertJsonCount(0, 'data.tipos.0.registros.1.acreditados');
+    }
+
+    public function test_download_history_records_company_identity_separately_from_internal_user(): void
+    {
+        app(RegistrarDescargaCredencial::class)->registrar(
+            idCredencial: 1,
+            tipo: 'png_individual',
+            idEmpresa: 1,
+            usuarioEmpresa: 'empresa-prueba'
+        );
+
+        $this->assertDatabaseHas('credencial_digital_descargas', [
+            'id_credencial' => 1,
+            'id_usuario' => null,
+            'id_empresa' => 1,
+            'usuario_empresa' => 'empresa-prueba',
+            'tipo_descarga' => 'png_individual',
+        ]);
     }
 
     public function test_accreditation_uses_remaining_capacity_across_direct_assignments_of_same_type(): void

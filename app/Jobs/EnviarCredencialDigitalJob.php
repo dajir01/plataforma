@@ -2,12 +2,12 @@
 
 namespace App\Jobs;
 
+use App\Support\RegistrarDescargaCredencial;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Str;
 
@@ -26,6 +26,8 @@ class EnviarCredencialDigitalJob implements ShouldQueue
         public string $nombreFeria,
         public string $imagenBase64,
         public ?int $idUsuario = null,
+        public ?int $idEmpresa = null,
+        public ?string $usuarioEmpresa = null,
     ) {
     }
 
@@ -42,13 +44,12 @@ class EnviarCredencialDigitalJob implements ShouldQueue
             }
         );
 
-        if (DB::getSchemaBuilder()->hasTable('credencial_digital_descargas')) {
-            DB::table('credencial_digital_descargas')->insert([
-                'id_credencial' => $this->idCredencial,
-                'id_usuario' => $this->idUsuario,
-                'tipo_descarga' => 'envio_email',
-                'created_at' => now(),
-            ]);
-        }
+        app(RegistrarDescargaCredencial::class)->registrar(
+            $this->idCredencial,
+            'envio_email',
+            $this->idUsuario,
+            $this->idEmpresa,
+            $this->usuarioEmpresa
+        );
     }
 }
