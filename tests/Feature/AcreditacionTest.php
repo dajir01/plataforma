@@ -4,9 +4,11 @@ namespace Tests\Feature;
 
 use App\Models\Empresa;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Storage;
 use Tests\TestCase;
 
 class AcreditacionTest extends TestCase
@@ -218,6 +220,30 @@ class AcreditacionTest extends TestCase
         $this->assertSame('images/fotos/acreditado_existente.jpg', DB::table('expositores')->where('id_exp', 2)->value('foto'));
     }
 
+    public function test_new_accreditation_saves_uploaded_photo_to_the_shared_photo_disk(): void
+    {
+        Storage::fake('acreditados');
+        Storage::fake('acreditados_anterior');
+
+        $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->post('/acreditaciones/eventos/10/acreditados', [
+                'id_vinculacion' => 2,
+                'tipo_credencial' => 'Expositor',
+                'ci' => '99999',
+                'tipo_documento' => 'Cédula de identidad',
+                'nombre' => 'Persona nueva',
+                'foto' => UploadedFile::fake()->image('persona.jpg'),
+            ])
+            ->assertCreated();
+
+        $rutaFoto = DB::table('expositores')->where('ci', '99999')->value('foto');
+        $filename = basename($rutaFoto);
+
+        $this->assertStringStartsWith('images/fotos/acreditado_', $rutaFoto);
+        Storage::disk('acreditados')->assertExists($filename);
+        Storage::disk('acreditados_anterior')->assertMissing($filename);
+    }
+
     public function test_existing_expositor_without_photo_must_upload_one_before_accreditation(): void
     {
         Log::spy();
@@ -247,6 +273,18 @@ class AcreditacionTest extends TestCase
             && $context['tipo_credencial'] === 'Expositor'
             && in_array('foto', $context['campos_con_error'], true)
             && isset($context['errores_por_campo']['foto']));
+    }
+
+    public function test_photo_route_can_read_a_photo_from_the_previous_storage_path(): void
+    {
+        $filename = 'acreditado_123e4567-e89b-12d3-a456-426614174000.jpg';
+        DB::table('expositores')->where('id_exp', 1)->update(['foto' => 'images/fotos/'.$filename]);
+        Storage::fake('acreditados_anterior');
+        Storage::disk('acreditados_anterior')->put($filename, 'photo-content');
+
+        $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->get('/acreditaciones/fotos/'.$filename)
+            ->assertOk();
     }
 
     public function test_required_field_validation_errors_are_written_to_laravel_log(): void

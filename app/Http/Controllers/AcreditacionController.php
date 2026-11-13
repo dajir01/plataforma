@@ -85,9 +85,14 @@ class AcreditacionController extends Controller
 
         $disk = Storage::disk('acreditados');
         if (! $disk->exists($filename)) {
-            $legacyDisk = Storage::disk('acreditados_legacy');
-            abort_unless($legacyDisk->exists($filename), 404);
-            $disk = $legacyDisk;
+            foreach (['acreditados_anterior', 'acreditados_legacy'] as $diskName) {
+                $legacyDisk = Storage::disk($diskName);
+                if ($legacyDisk->exists($filename)) {
+                    $disk = $legacyDisk;
+                    break;
+                }
+            }
+            abort_unless($disk->exists($filename), 404);
         }
 
         return response()->file($disk->path($filename), [

@@ -49,7 +49,13 @@ return [
 
         'acreditados' => [
             'driver' => 'local',
-            'root' => env('CREDENTIAL_PHOTOS_PATH') ?: env('ACREDITADOS_PHOTOS_PATH') ?: base_path('../intranetfexco/storage/app/private/accredited-photos'),
+            'root' => env('CREDENTIAL_PHOTOS_PATH') ?: base_path('../intranetfexco/storage/app/private/accredited-photos'),
+            'throw' => true,
+            'report' => false,
+        ],
+        'acreditados_anterior' => [
+            'driver' => 'local',
+            'root' => env('ACREDITADOS_PHOTOS_PATH') ?: storage_path('app/private/accredited-photos'),
             'throw' => true,
             'report' => false,
         ],
