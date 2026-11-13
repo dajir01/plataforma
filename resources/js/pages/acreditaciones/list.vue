@@ -24,6 +24,7 @@ const credencialesSeleccionadas = ref([])
 const dialogConflicto = ref(false)
 const expositorConflicto = ref(null)
 const guardando = ref(false)
+const comprimiendoFoto = ref(false)
 const errorFormulario = ref('')
 const erroresCampos = ref({})
 const buscandoCi = ref(false)
@@ -33,6 +34,7 @@ const ciAcreditadoEnEvento = ref(false)
 const archivoFoto = ref(null)
 const previewFoto = ref('')
 const inputFoto = ref(null)
+const tamanoMaximoFoto = 2 * 1024 * 1024
 let actualizacionTimer = null
 let solicitudResumen = 0
 
@@ -434,25 +436,82 @@ const buscarPorCi = async () => {
   }
 }
 
-const seleccionarFoto = event => {
+const comprimirFoto = async archivo => {
+  const imagen = await createImageBitmap(archivo)
+  const canvas = document.createElement('canvas')
+  const contexto = canvas.getContext('2d')
+  if (!contexto) {
+    imagen.close()
+    throw new Error('No se pudo procesar la fotografía.')
+  }
+
+  try {
+    let escala = Math.min(1, 2560 / Math.max(imagen.width, imagen.height))
+    let calidad = 0.88
+
+    for (let intento = 0; intento < 24; intento++) {
+      canvas.width = Math.max(1, Math.round(imagen.width * escala))
+      canvas.height = Math.max(1, Math.round(imagen.height * escala))
+      contexto.fillStyle = '#fff'
+      contexto.fillRect(0, 0, canvas.width, canvas.height)
+      contexto.drawImage(imagen, 0, 0, canvas.width, canvas.height)
+
+      const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', calidad))
+      if (!blob)
+        throw new Error('No se pudo procesar la fotografía.')
+
+      if (blob.size <= tamanoMaximoFoto) {
+        const nombre = archivo.name.replace(/\.[^.]+$/, '') || 'acreditado'
+
+        return new File([blob], `${nombre}.jpg`, { type: 'image/jpeg', lastModified: Date.now() })
+      }
+
+      if (calidad > 0.55)
+        calidad = Math.max(0.55, calidad - 0.1)
+      else {
+        escala *= 0.85
+        calidad = 0.82
+      }
+    }
+
+    throw new Error('No se pudo reducir la fotografía a 2 MB. Elija una imagen más pequeña.')
+  } finally {
+    imagen.close()
+  }
+}
+
+const seleccionarFoto = async event => {
   const archivo = event.target.files?.[0]
   if (!archivo) return
-  if (!['image/jpeg', 'image/png'].includes(archivo.type) || archivo.size > 2 * 1024 * 1024) {
-    erroresCampos.value = { ...erroresCampos.value, foto: 'Seleccione una imagen JPG o PNG de máximo 2 MB.' }
+  event.target.value = ''
+
+  if (!['image/jpeg', 'image/png'].includes(archivo.type)) {
+    erroresCampos.value = { ...erroresCampos.value, foto: 'Seleccione una imagen JPG o PNG.' }
     errorFormulario.value = 'Corrija el campo de fotografía marcado en rojo.'
-    event.target.value = ''
 
     return
   }
-  if (previewFoto.value.startsWith('blob:'))
-    URL.revokeObjectURL(previewFoto.value)
+
+  comprimiendoFoto.value = archivo.size > tamanoMaximoFoto
   limpiarErrorCampo('foto')
-  archivoFoto.value = archivo
-  formulario.value.foto = archivo
-  previewFoto.value = URL.createObjectURL(archivo)
+  try {
+    const foto = comprimiendoFoto.value ? await comprimirFoto(archivo) : archivo
+    if (previewFoto.value.startsWith('blob:'))
+      URL.revokeObjectURL(previewFoto.value)
+    archivoFoto.value = foto
+    formulario.value.foto = foto
+    previewFoto.value = URL.createObjectURL(foto)
+  } catch (exception) {
+    erroresCampos.value = { ...erroresCampos.value, foto: exception.message }
+    errorFormulario.value = 'Corrija el campo de fotografía marcado en rojo.'
+  } finally {
+    comprimiendoFoto.value = false
+  }
 }
 
 const guardarAcreditado = async () => {
+  if (comprimiendoFoto.value || erroresCampos.value.foto) return
+
   const asignacion = asignacionesDisponibles.value.find(item => item.clave === asignacionSeleccionada.value)
   if (!asignacion) {
     errorFormulario.value = 'Seleccione una asignación con credenciales disponibles.'
@@ -1087,12 +1146,14 @@ onBeforeUnmount(() => {
                 type="file"
                 accept="image/png,image/jpeg"
                 class="d-none"
+                :disabled="!camposHabilitados || comprimiendoFoto"
                 @change="seleccionarFoto"
               ><button
                 type="button"
                 class="acreditacion-photo-picker"
                 :class="{ 'acreditacion-photo-picker--error': erroresCampos.foto }"
                 :aria-invalid="Boolean(erroresCampos.foto)"
+                :disabled="!camposHabilitados || comprimiendoFoto"
                 @click="inputFoto?.click()"
               >
                 <VImg
@@ -1111,7 +1172,14 @@ onBeforeUnmount(() => {
                   Fotografía *
                 </p>
                 <p class="text-body-2 text-medium-emphasis mb-2">
-                  JPG o PNG, máximo 2 MB. Las fotos mayores se reducen automáticamente.
+                  JPG o PNG, máximo 2 MB. Las fotos mayores se reducen y convierten automáticamente a JPG.
+                </p>
+                <p
+                  v-if="comprimiendoFoto"
+                  class="text-primary text-caption mb-2"
+                  role="status"
+                >
+                  Comprimiendo fotografía…
                 </p>
                 <p
                   v-if="erroresCampos.foto"
@@ -1123,6 +1191,8 @@ onBeforeUnmount(() => {
                   variant="tonal"
                   color="primary"
                   prepend-icon="tabler-upload"
+                  :loading="comprimiendoFoto"
+                  :disabled="!camposHabilitados || comprimiendoFoto"
                   @click="inputFoto?.click()"
                 >
                   Cargar Fotografía
@@ -1142,7 +1212,7 @@ onBeforeUnmount(() => {
           </VBtn><VBtn
             color="primary"
             :loading="guardando"
-            :disabled="ciAcreditadoEnEvento"
+            :disabled="ciAcreditadoEnEvento || comprimiendoFoto || Boolean(erroresCampos.foto)"
             @click="guardarAcreditado"
           >
             Acreditar expositor
