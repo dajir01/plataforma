@@ -7,7 +7,6 @@ use App\Models\Empresa;
 use App\Support\EmpresaEventoAccess;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Log;
 
@@ -66,14 +65,6 @@ class EmpresaAuthController extends Controller
             return response()->json([
                 'message' => 'Esta empresa no tiene un contrato vigente con ningún evento próximo.',
             ], 403);
-        }
-
-        if (! str_starts_with((string) $empresa->pass, '$2y$') || Hash::needsRehash($empresa->pass)) {
-            $hash = Hash::make($password);
-            DB::table('empresas')
-                ->where('id_empresa', $empresa->id_empresa)
-                ->update(['pass' => $hash]);
-            $empresa->pass = $hash;
         }
 
         Auth::guard('empresa')->login($empresa, $request->boolean('remember'));

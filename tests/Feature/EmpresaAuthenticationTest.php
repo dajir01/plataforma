@@ -68,7 +68,7 @@ class EmpresaAuthenticationTest extends TestCase
         $this->assertTrue(Hash::check('correct-password', $storedPassword));
     }
 
-    public function test_successful_login_upgrades_a_legacy_plaintext_password(): void
+    public function test_successful_login_and_logout_keep_a_legacy_plaintext_password_unchanged(): void
     {
         $this->seedEligibleCompany('legacy-password');
 
@@ -78,9 +78,10 @@ class EmpresaAuthenticationTest extends TestCase
         ]);
 
         $response->assertOk();
-        $storedPassword = DB::table('empresas')->value('pass');
-        $this->assertNotSame('legacy-password', $storedPassword);
-        $this->assertTrue(Hash::check('legacy-password', $storedPassword));
+        $this->assertSame('legacy-password', DB::table('empresas')->value('pass'));
+
+        $this->postJson('/logout')->assertOk();
+        $this->assertSame('legacy-password', DB::table('empresas')->value('pass'));
     }
 
     public function test_company_cannot_search_exhibitors_for_an_event_it_cannot_access(): void
