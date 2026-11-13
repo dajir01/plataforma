@@ -1011,15 +1011,15 @@ onBeforeUnmount(() => {
                   <td class="text-end">
                     <VBtn
                       v-if="esDigital(acreditado)"
-                      icon
                       size="small"
-                      variant="text"
+                      variant="flat"
                       color="primary"
+                      prepend-icon="tabler-download"
                       @click="descargarIndividual(acreditado.id_credencial)"
                     >
-                      <VIcon icon="tabler-download" />
+                      Descargar credencial digital
                       <VTooltip activator="parent">
-                        Descargar credencial digital
+                        Haz clic para descargar la credencial digital.
                       </VTooltip>
                     </VBtn>
                   </td>
