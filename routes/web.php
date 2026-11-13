@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Route;
 Route::get('/csrf-token', function () {
     return response()->json([
         'token' => csrf_token(),
-    ]);
+    ])->header('Cache-Control', 'no-store, private');
 });
 
 Route::post('/login', [EmpresaAuthController::class, 'login'])->middleware('throttle:5,1');

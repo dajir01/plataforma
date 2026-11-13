@@ -68,6 +68,14 @@ class EmpresaAuthenticationTest extends TestCase
         $this->assertTrue(Hash::check('correct-password', $storedPassword));
     }
 
+    public function test_csrf_token_endpoint_is_not_cacheable(): void
+    {
+        $this->getJson('/csrf-token')
+            ->assertOk()
+            ->assertHeader('Cache-Control', 'no-store, private')
+            ->assertJsonStructure(['token']);
+    }
+
     public function test_successful_login_and_logout_keep_a_legacy_plaintext_password_unchanged(): void
     {
         $this->seedEligibleCompany('legacy-password');

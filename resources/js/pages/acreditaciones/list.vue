@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useAuthStore } from '@/stores/auth'
+import { refreshCsrfToken, useAuthStore } from '@/stores/auth'
 
 definePage({ meta: { title: 'Acreditaciones' } })
 
@@ -100,7 +100,18 @@ const totales = computed(() => tipos.value.reduce((total, tipo) => ({
 }), { asignadas: 0, acreditadas: 0, disponibles: 0 }))
 
 const obtener = async (url, options = {}) => {
-  const response = await fetch(url, { ...options, headers: { Accept: 'application/json', ...(options.headers || {}) }, credentials: 'same-origin' })
+  const headers = { Accept: 'application/json', ...(options.headers || {}) }
+  const method = (options.method || 'GET').toUpperCase()
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const token = await refreshCsrfToken()
+    if (!token)
+      throw new Error('No se pudo renovar el token de seguridad. Recargue la página e inténtelo de nuevo.')
+    headers['X-CSRF-TOKEN'] = token
+    if (options.body instanceof FormData)
+      options.body.set('_token', token)
+  }
+
+  const response = await fetch(url, { ...options, headers, credentials: 'same-origin' })
   let payload
   try {
     payload = await response.json()
@@ -278,15 +289,19 @@ const descargarSeleccionadas = async tipo => {
   if (!seleccionadas.length) return
 
   try {
+    const csrfToken = await refreshCsrfToken()
+    if (!csrfToken)
+      throw new Error('No se pudo renovar el token de seguridad. Recargue la página e inténtelo de nuevo.')
+
     const response = await fetch('/acreditaciones/credenciales/descargar', {
       method: 'POST',
       headers: {
         Accept: 'application/zip',
         'Content-Type': 'application/json',
-        'X-CSRF-TOKEN': document.querySelector('meta[name="csrf-token"]')?.content || '',
+        'X-CSRF-TOKEN': csrfToken,
       },
       credentials: 'same-origin',
-      body: JSON.stringify({ credenciales: seleccionadas, archivo: true }),
+      body: JSON.stringify({ credenciales: seleccionadas, archivo: true, _token: csrfToken }),
     })
 
     if (!response.ok) {

@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 
 const getCsrfToken = () => document.querySelector('meta[name="csrf-token"]')?.getAttribute('content') || ''
+
 const setCsrfToken = token => {
   if (!token)
     return
@@ -10,11 +11,12 @@ const setCsrfToken = token => {
     meta.setAttribute('content', token)
 }
 
-const refreshCsrfToken = async () => {
+export const refreshCsrfToken = async () => {
   try {
     const response = await fetch('/csrf-token', {
       headers: { Accept: 'application/json' },
       credentials: 'same-origin',
+      cache: 'no-store',
     })
 
     if (!response.ok)
@@ -29,6 +31,7 @@ const refreshCsrfToken = async () => {
   }
   catch (error) {
     console.error('Unable to refresh CSRF token', error)
+
     return null
   }
 }
