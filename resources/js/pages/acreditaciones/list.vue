@@ -210,7 +210,11 @@ const urlFoto = foto => {
   if (!/^acreditado_[a-f0-9-]+\.(?:jpg|jpeg|png)$/i.test(filename))
     return ''
 
-  return `/acreditaciones/fotos/${encodeURIComponent(filename)}`
+  const url = `/acreditaciones/fotos/${encodeURIComponent(filename)}`
+
+  return eventoSeleccionado.value
+    ? `${url}?id_feria=${encodeURIComponent(eventoSeleccionado.value)}`
+    : url
 }
 
 const esDigital = acreditado => acreditado.modalidad_credencial === 'Digital'

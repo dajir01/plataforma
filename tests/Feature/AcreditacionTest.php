@@ -287,6 +287,23 @@ class AcreditacionTest extends TestCase
             ->assertOk();
     }
 
+    public function test_company_with_event_access_can_view_a_registered_expositor_photo(): void
+    {
+        $filename = 'acreditado_123e4567-e89b-12d3-a456-426614174001.jpg';
+        DB::table('expositores')->where('id_exp', 2)->update(['foto' => 'images/fotos/'.$filename]);
+        Storage::fake('acreditados');
+        Storage::disk('acreditados')->put($filename, 'photo-content');
+
+        $empresa = Empresa::query()->findOrFail(1);
+        $this->actingAs($empresa, 'empresa')
+            ->get('/acreditaciones/fotos/'.$filename.'?id_feria=10')
+            ->assertOk();
+
+        $this->actingAs($empresa, 'empresa')
+            ->get('/acreditaciones/fotos/'.$filename.'?id_feria=11')
+            ->assertNotFound();
+    }
+
     public function test_required_field_validation_errors_are_written_to_laravel_log(): void
     {
         Log::spy();

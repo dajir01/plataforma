@@ -68,19 +68,24 @@ class AcreditacionController extends Controller
         ]);
     }
 
-    public function mostrarFotoAcreditado(string $filename)
+    public function mostrarFotoAcreditado(Request $request, string $filename)
     {
         abort_unless(preg_match('/^acreditado_[a-f0-9-]+\.(jpg|jpeg|png)$/i', $filename), 404);
 
         $empresa = Auth::guard('empresa')->user();
         abort_unless($empresa, 401);
 
+        $rutaFoto = 'images/fotos/'.$filename;
         $fotoAutorizada = DB::table('credenciales as credencial')
             ->join('expositores as expositor', 'expositor.id_exp', '=', 'credencial.id_expositor')
             ->where('credencial.id_empresa', $empresa->id_empresa)
-            ->where('expositor.foto', 'images/fotos/'.$filename)
+            ->where('expositor.foto', $rutaFoto)
             ->where('credencial.estado_credencial', '!=', 3)
             ->exists();
+        $idFeria = $request->integer('id_feria');
+        if (! $fotoAutorizada && $idFeria > 0 && $this->empresaEventoAccess->puedeAcceder($empresa, $idFeria)) {
+            $fotoAutorizada = DB::table('expositores')->where('foto', $rutaFoto)->exists();
+        }
         abort_unless($fotoAutorizada, 404);
 
         $disk = Storage::disk('acreditados');
