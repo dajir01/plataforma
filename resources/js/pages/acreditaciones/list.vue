@@ -25,6 +25,7 @@ const dialogConflicto = ref(false)
 const expositorConflicto = ref(null)
 const guardando = ref(false)
 const errorFormulario = ref('')
+const erroresCampos = ref({})
 const buscandoCi = ref(false)
 const resultadoCi = ref(null)
 const camposHabilitados = ref(false)
@@ -106,7 +107,10 @@ const obtener = async (url, options = {}) => {
   }
   if (!response.ok) {
     const mensajeValidacion = Object.values(payload.errors || {}).flat().find(Boolean)
-    throw new Error(payload.message || mensajeValidacion || 'No se pudo cargar la información.')
+    const error = new Error(payload.message || mensajeValidacion || 'No se pudo cargar la información.')
+
+    error.validationErrors = payload.errors || {}
+    throw error
   }
   
   return payload
@@ -354,8 +358,27 @@ const limpiarFormulario = () => {
   archivoFoto.value = null
   previewFoto.value = ''
   errorFormulario.value = ''
+  erroresCampos.value = {}
   dialogConflicto.value = false
   expositorConflicto.value = null
+}
+
+const limpiarErrorCampo = campo => {
+  if (!erroresCampos.value[campo])
+    return
+
+  const errores = { ...erroresCampos.value }
+
+  delete errores[campo]
+  erroresCampos.value = errores
+  if (Object.keys(errores).length === 0)
+    errorFormulario.value = ''
+}
+
+const mensajeErrorCampo = campo => {
+  const error = erroresCampos.value[campo]
+
+  return Array.isArray(error) ? error[0] : error
 }
 
 const abrirAcreditar = tipo => {
@@ -390,7 +413,7 @@ const buscarPorCi = async () => {
     if (expositor) {
       if (previewFoto.value.startsWith('blob:'))
         URL.revokeObjectURL(previewFoto.value)
-      formulario.value = { ...formulario.value, idExpositor: expositor.id_expositor, ci: expositor.ci || ci, tipoDocumento: expositor.tipo_documento || '', nombre: expositor.nombre || '', email: expositor.email || '', celular: expositor.celular || '', numeroCelular: String(expositor.celular || '').replace(/\D/g, '').replace(/^591/, ''), foto: null }
+      formulario.value = { ...formulario.value, idExpositor: expositor.id_expositor, ci: expositor.ci || ci, tipoDocumento: expositor.tipo_documento || '', nombre: expositor.nombre || '', email: expositor.email || '', celular: expositor.celular || '', numeroCelular: String(expositor.celular || '').replace(/\D/g, '').replace(/^591/, ''), foto: expositor.foto || null }
       previewFoto.value = urlFoto(expositor.foto)
       ciAcreditadoEnEvento.value = Boolean(expositor.credencial_evento)
       if (expositor.credencial_evento) {
@@ -415,14 +438,15 @@ const seleccionarFoto = event => {
   const archivo = event.target.files?.[0]
   if (!archivo) return
   if (!['image/jpeg', 'image/png'].includes(archivo.type) || archivo.size > 2 * 1024 * 1024) {
-    errorFormulario.value = 'Seleccione una imagen JPG o PNG de máximo 2 MB.'
+    erroresCampos.value = { ...erroresCampos.value, foto: 'Seleccione una imagen JPG o PNG de máximo 2 MB.' }
+    errorFormulario.value = 'Corrija el campo de fotografía marcado en rojo.'
     event.target.value = ''
 
     return
   }
   if (previewFoto.value.startsWith('blob:'))
     URL.revokeObjectURL(previewFoto.value)
-  errorFormulario.value = ''
+  limpiarErrorCampo('foto')
   archivoFoto.value = archivo
   formulario.value.foto = archivo
   previewFoto.value = URL.createObjectURL(archivo)
@@ -442,9 +466,22 @@ const guardarAcreditado = async () => {
     return
   }
 
-  if (!formulario.value.ci.trim() || !formulario.value.tipoDocumento || !formulario.value.nombre.trim() || !celularValido.value || (!formulario.value.idExpositor && !archivoFoto.value)) {
-    errorFormulario.value = 'Complete los campos obligatorios y seleccione una fotografía.'
-    
+  const errores = {}
+  if (!formulario.value.ci.trim())
+    errores.ci = 'Ingrese el carnet de identidad.'
+  if (!formulario.value.tipoDocumento)
+    errores.tipoDocumento = 'Seleccione el tipo de documento.'
+  if (!formulario.value.nombre.trim())
+    errores.nombre = 'Ingrese el nombre completo.'
+  if (!celularValido.value)
+    errores.celular = formulario.value.codigoPais === '591' ? 'Bolivia requiere 8 dígitos.' : 'Ingrese entre 7 y 14 dígitos.'
+  if (!formulario.value.foto && !archivoFoto.value)
+    errores.foto = 'Cargue una fotografía para continuar.'
+
+  erroresCampos.value = errores
+  if (Object.keys(errores).length > 0) {
+    errorFormulario.value = 'Complete o corrija los campos marcados en rojo.'
+
     return
   }
 
@@ -468,7 +505,27 @@ const guardarAcreditado = async () => {
     dialogAcreditar.value = false
     await cargarResumen(eventoSeleccionado.value)
   } catch (exception) {
-    errorFormulario.value = exception.message
+    const erroresServidor = exception.validationErrors || {}
+
+    const camposValidables = [
+      { respuesta: 'ci', campo: 'ci' },
+      { respuesta: 'tipo_documento', campo: 'tipoDocumento' },
+      { respuesta: 'nombre', campo: 'nombre' },
+      { respuesta: 'email', campo: 'email' },
+      { respuesta: 'celular', campo: 'celular' },
+      { respuesta: 'foto', campo: 'foto' },
+    ]
+
+    const erroresDeCampos = Object.fromEntries(
+      camposValidables
+        .filter(({ respuesta }) => erroresServidor[respuesta])
+        .map(({ respuesta, campo }) => [campo, erroresServidor[respuesta]]),
+    )
+
+    erroresCampos.value = erroresDeCampos
+    errorFormulario.value = Object.keys(erroresDeCampos).length > 0
+      ? 'Complete o corrija los campos marcados en rojo.'
+      : exception.message
   } finally {
     guardando.value = false
   }
@@ -939,8 +996,10 @@ onBeforeUnmount(() => {
                     v-model="formulario.ci"
                     label="Carnet de identidad *"
                     variant="outlined"
+                    :error-messages="erroresCampos.ci"
                     :loading="buscandoCi"
                     :readonly="Boolean(formulario.idExpositor)"
+                    @update:model-value="limpiarErrorCampo('ci')"
                     @blur="buscarPorCi"
                   />
                 </VCol>
@@ -954,6 +1013,8 @@ onBeforeUnmount(() => {
                     :items="['Cédula de identidad', 'Pasaporte', 'Documento extranjero']"
                     variant="outlined"
                     :disabled="!camposHabilitados"
+                    :error-messages="erroresCampos.tipoDocumento"
+                    @update:model-value="limpiarErrorCampo('tipoDocumento')"
                   />
                 </VCol>
               </VRow>
@@ -964,6 +1025,8 @@ onBeforeUnmount(() => {
                 label="Nombre completo *"
                 variant="outlined"
                 :disabled="!camposHabilitados"
+                :error-messages="erroresCampos.nombre"
+                @update:model-value="limpiarErrorCampo('nombre')"
               />
             </VCol>
             <VCol
@@ -990,9 +1053,9 @@ onBeforeUnmount(() => {
                 density="comfortable"
                 inputmode="numeric"
                 :maxlength="formulario.codigoPais === '591' ? 8 : 14"
-                :error-messages="!celularValido ? (formulario.codigoPais === '591' ? 'Bolivia requiere 8 dígitos.' : 'Ingrese entre 7 y 14 dígitos.') : undefined"
+                :error-messages="erroresCampos.celular || (!celularValido ? (formulario.codigoPais === '591' ? 'Bolivia requiere 8 dígitos.' : 'Ingrese entre 7 y 14 dígitos.') : undefined)"
                 :disabled="!camposHabilitados"
-                @update:model-value="formulario.numeroCelular = String($event).replace(/\D/g, '')"
+                @update:model-value="formulario.numeroCelular = String($event).replace(/\D/g, ''); limpiarErrorCampo('celular')"
               />
               <div
                 class="text-caption mt-1"
@@ -1007,10 +1070,12 @@ onBeforeUnmount(() => {
             >
               <VTextField
                 v-model="formulario.email"
-                label="Correo electrónico"
+                label="Correo electrónico (opcional)"
                 type="email"
                 variant="outlined"
                 :disabled="!camposHabilitados"
+                :error-messages="erroresCampos.email"
+                @update:model-value="limpiarErrorCampo('email')"
               />
             </VCol>
             <VCol
@@ -1026,6 +1091,8 @@ onBeforeUnmount(() => {
               ><button
                 type="button"
                 class="acreditacion-photo-picker"
+                :class="{ 'acreditacion-photo-picker--error': erroresCampos.foto }"
+                :aria-invalid="Boolean(erroresCampos.foto)"
                 @click="inputFoto?.click()"
               >
                 <VImg
@@ -1045,6 +1112,12 @@ onBeforeUnmount(() => {
                 </p>
                 <p class="text-body-2 text-medium-emphasis mb-2">
                   JPG o PNG, máximo 2 MB. Las fotos mayores se reducen automáticamente.
+                </p>
+                <p
+                  v-if="erroresCampos.foto"
+                  class="text-error text-caption mb-2"
+                >
+                  {{ mensajeErrorCampo('foto') }}
                 </p>
                 <VBtn
                   variant="tonal"
@@ -1202,6 +1275,7 @@ onBeforeUnmount(() => {
 .acreditacion-dialog-body { background: rgba(var(--v-theme-on-surface), .01); }
 .acreditacion-dialog-actions { background: rgba(var(--v-theme-primary), .03); }
 .acreditacion-photo-picker { display: inline-flex; align-items: center; justify-content: center; inline-size: 140px; block-size: 140px; padding: 0; overflow: hidden; border: 2px dashed rgba(var(--v-theme-on-surface), .48); border-radius: 50%; background: rgba(var(--v-theme-on-surface), .02); color: rgba(var(--v-theme-on-surface), .7); cursor: pointer; }
+.acreditacion-photo-picker--error { border-color: rgb(var(--v-theme-error)); color: rgb(var(--v-theme-error)); }
 .acreditacion-photo-preview { inline-size: 100%; block-size: 100%; }
 .conflicto-acreditado-contenido { inline-size: min(100%, 560px); margin-inline: auto; }
 .conflicto-acreditado-linea { text-align: center; }

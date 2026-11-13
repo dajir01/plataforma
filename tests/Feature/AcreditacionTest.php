@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Empresa;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Tests\TestCase;
 
@@ -201,6 +202,8 @@ class AcreditacionTest extends TestCase
 
     public function test_accreditation_uses_remaining_capacity_across_direct_assignments_of_same_type(): void
     {
+        DB::table('expositores')->where('id_exp', 2)->update(['foto' => 'images/fotos/acreditado_existente.jpg']);
+
         $response = $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
             ->post('/acreditaciones/eventos/10/acreditados', [
                 'id_vinculacion' => 2,
@@ -212,6 +215,63 @@ class AcreditacionTest extends TestCase
 
         $response->assertCreated();
         $this->assertSame(2, DB::table('credenciales')->where('id_feria', 10)->count());
+        $this->assertSame('images/fotos/acreditado_existente.jpg', DB::table('expositores')->where('id_exp', 2)->value('foto'));
+    }
+
+    public function test_existing_expositor_without_photo_must_upload_one_before_accreditation(): void
+    {
+        Log::spy();
+
+        $response = $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->postJson('/acreditaciones/eventos/10/acreditados', [
+                'id_vinculacion' => 2,
+                'tipo_credencial' => 'Expositor',
+                'ci' => '67890',
+                'tipo_documento' => 'Cédula de identidad',
+                'nombre' => 'Nombre que no debe guardarse',
+            ]);
+
+        $response->assertUnprocessable()
+            ->assertJsonValidationErrors(['foto']);
+        $this->assertSame(1, DB::table('credenciales')->where('id_feria', 10)->count());
+        $this->assertSame('Otra persona', DB::table('expositores')->where('id_exp', 2)->value('nombre'));
+        $this->assertNull(DB::table('expositores')->where('id_exp', 2)->value('foto'));
+        Log::shouldHaveReceived('warning')->once()->withArgs(fn ($message, $context) => $message === 'Acreditación rechazada para la empresa Empresa de prueba (ID 1) durante validación de reglas de acreditación.'
+            && $context['operacion'] === 'App\Http\Controllers\AcreditacionController@acreditar'
+            && $context['ruta'] === '/acreditaciones/eventos/{idFeria}/acreditados'
+            && $context['etapa'] === 'validación de reglas de acreditación'
+            && $context['id_empresa'] === 1
+            && $context['nombre_empresa'] === 'Empresa de prueba'
+            && $context['id_feria'] === 10
+            && $context['id_vinculacion'] === 2
+            && $context['tipo_credencial'] === 'Expositor'
+            && in_array('foto', $context['campos_con_error'], true)
+            && isset($context['errores_por_campo']['foto']));
+    }
+
+    public function test_required_field_validation_errors_are_written_to_laravel_log(): void
+    {
+        Log::spy();
+
+        $response = $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->postJson('/acreditaciones/eventos/10/acreditados', [
+                'id_vinculacion' => 2,
+                'tipo_credencial' => 'Expositor',
+            ]);
+
+        $response->assertUnprocessable()
+            ->assertJsonValidationErrors(['ci', 'tipo_documento', 'nombre']);
+        Log::shouldHaveReceived('warning')->once()->withArgs(fn ($message, $context) => $message === 'Acreditación rechazada para la empresa Empresa de prueba (ID 1) durante validación de datos de solicitud.'
+            && $context['operacion'] === 'App\Http\Controllers\AcreditacionController@acreditar'
+            && $context['ruta'] === '/acreditaciones/eventos/{idFeria}/acreditados'
+            && $context['etapa'] === 'validación de datos de solicitud'
+            && $context['id_empresa'] === 1
+            && $context['nombre_empresa'] === 'Empresa de prueba'
+            && $context['id_feria'] === 10
+            && in_array('ci', $context['campos_con_error'], true)
+            && in_array('tipo_documento', $context['campos_con_error'], true)
+            && in_array('nombre', $context['campos_con_error'], true)
+            && isset($context['errores_por_campo']['ci']));
     }
 
     public function test_event_19_forces_all_contract_credentials_to_digital(): void
@@ -266,6 +326,7 @@ class AcreditacionTest extends TestCase
             ->assertJsonPath('data.tipos.0.registros.0.acreditados.0.modalidad_credencial', 'Digital')
             ->assertJsonPath('data.tipos.0.registros.1.modalidad_credencial', 'Digital');
 
+        DB::table('expositores')->where('id_exp', 2)->update(['foto' => 'images/fotos/acreditado_existente.jpg']);
         $this->actingAs($empresa, 'empresa')
             ->post('/acreditaciones/eventos/19/acreditados', [
                 'id_contrato' => 20,

@@ -15,6 +15,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
@@ -393,23 +394,47 @@ class AcreditacionController extends Controller
             return response()->json(['message' => 'La sesión no es válida.'], 401);
         }
 
-        $datos = $request->validate([
-            'id_contrato' => ['nullable', 'integer'],
-            'id_vinculacion' => ['nullable', 'integer'],
-            'tipo_credencial' => ['required', 'string', 'max:100'],
-            'ci' => ['required', 'string', 'max:50'],
-            'tipo_documento' => ['required', 'string', 'max:50'],
-            'nombre' => ['required', 'string', 'max:255'],
-            'email' => ['nullable', 'email', 'max:255'],
-            'celular' => ['nullable', 'string', 'max:50'],
-            'foto' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:2048'],
-        ]);
+        try {
+            $datos = $request->validate([
+                'id_contrato' => ['nullable', 'integer'],
+                'id_vinculacion' => ['nullable', 'integer'],
+                'tipo_credencial' => ['required', 'string', 'max:100'],
+                'ci' => ['required', 'string', 'max:50'],
+                'tipo_documento' => ['required', 'string', 'max:50'],
+                'nombre' => ['required', 'string', 'max:255'],
+                'email' => ['nullable', 'email', 'max:255'],
+                'celular' => ['nullable', 'string', 'max:50'],
+                'foto' => ['nullable', 'image', 'mimes:jpg,jpeg,png', 'max:2048'],
+            ]);
+        } catch (ValidationException $exception) {
+            $this->registrarErrorValidacionAcreditacion(
+                $exception,
+                $idFeria,
+                (int) $empresa->id_empresa,
+                (string) $empresa->nombre_empresa,
+                'validación de datos de solicitud'
+            );
+
+            throw $exception;
+        }
         $datos['nombre'] = $this->normalizarNombre($datos['nombre']);
         $celular = trim((string) ($datos['celular'] ?? ''));
         if ($celular !== '' && ! preg_match('/^\+591\d{8}$|^\+\d{7,14}$/', $celular)) {
-            throw ValidationException::withMessages([
+            $exception = ValidationException::withMessages([
                 'celular' => 'El número de Bolivia debe tener 8 dígitos. Otros países deben tener entre 7 y 14 dígitos.',
             ]);
+            $this->registrarErrorValidacionAcreditacion(
+                $exception,
+                $idFeria,
+                (int) $empresa->id_empresa,
+                (string) $empresa->nombre_empresa,
+                'validación de formato del celular',
+                isset($datos['id_contrato']) ? (int) $datos['id_contrato'] : null,
+                isset($datos['id_vinculacion']) ? (int) $datos['id_vinculacion'] : null,
+                $datos['tipo_credencial'] ?? null
+            );
+
+            throw $exception;
         }
 
         $fotoAlmacenada = null;
@@ -501,12 +526,14 @@ class AcreditacionController extends Controller
                     if ($yaAcreditado) {
                         throw ValidationException::withMessages(['ci' => 'Este expositor ya está acreditado en este evento.']);
                     }
+                }
+                if (! $foto && empty($expositor?->foto)) {
+                    throw ValidationException::withMessages(['foto' => 'La fotografía es obligatoria para un expositor sin fotografía registrada.']);
+                }
+                if ($expositor) {
                     $idExpositor = (int) $expositor->id_exp;
                     DB::table('expositores')->where('id_exp', $idExpositor)->update(['tipo_documento' => $datos['tipo_documento'], 'nombre' => trim($datos['nombre']), 'email' => $datos['email'] ?? null, 'celular' => $datos['celular'] ?? null, 'updated_at' => now()]);
                 } else {
-                    if (! $foto) {
-                        throw ValidationException::withMessages(['foto' => 'La fotografía es obligatoria para un expositor nuevo.']);
-                    }
                     $idExpositor = DB::table('expositores')->insertGetId(['ci' => $ci, 'tipo_documento' => $datos['tipo_documento'], 'nombre' => trim($datos['nombre']), 'email' => $datos['email'] ?? null, 'celular' => $datos['celular'] ?? null, 'estado' => true, 'created_at' => now(), 'updated_at' => now()]);
                 }
                 $rutaFoto = $expositor?->foto;
@@ -527,6 +554,19 @@ class AcreditacionController extends Controller
                 return ['id_expositor' => $idExpositor, 'id_credencial' => $idCredencial, 'foto' => $rutaFoto];
             });
         } catch (\Throwable $exception) {
+            if ($exception instanceof ValidationException) {
+                $this->registrarErrorValidacionAcreditacion(
+                    $exception,
+                    $idFeria,
+                    (int) $empresa->id_empresa,
+                    (string) $empresa->nombre_empresa,
+                    'validación de reglas de acreditación',
+                    isset($datos['id_contrato']) ? (int) $datos['id_contrato'] : null,
+                    isset($datos['id_vinculacion']) ? (int) $datos['id_vinculacion'] : null,
+                    $datos['tipo_credencial'] ?? null
+                );
+            }
+
             if ($fotoAlmacenada) {
                 try {
                     Storage::disk('acreditados')->delete($fotoAlmacenada);
@@ -539,6 +579,36 @@ class AcreditacionController extends Controller
         }
 
         return response()->json(['success' => true, 'message' => 'Acreditado registrado correctamente.', 'data' => $resultado], 201);
+    }
+
+    private function registrarErrorValidacionAcreditacion(
+        ValidationException $exception,
+        int $idFeria,
+        int $idEmpresa,
+        string $nombreEmpresa,
+        string $etapa,
+        ?int $idContrato = null,
+        ?int $idVinculacion = null,
+        ?string $tipoCredencial = null
+    ): void {
+        $nombreEmpresa = trim($nombreEmpresa) !== '' ? trim($nombreEmpresa) : 'nombre no registrado';
+
+        Log::warning("Acreditación rechazada para la empresa {$nombreEmpresa} (ID {$idEmpresa}) durante {$etapa}.", [
+            'operacion' => 'App\Http\Controllers\AcreditacionController@acreditar',
+            'metodo_http' => 'POST',
+            'ruta' => '/acreditaciones/eventos/{idFeria}/acreditados',
+            'etapa' => $etapa,
+            'id_empresa' => $idEmpresa,
+            'nombre_empresa' => $nombreEmpresa,
+            'id_feria' => $idFeria,
+            'id_contrato' => $idContrato,
+            'id_vinculacion' => $idVinculacion,
+            'tipo_credencial' => $tipoCredencial,
+            'tipo_error' => ValidationException::class,
+            'codigo_http' => 422,
+            'campos_con_error' => array_keys($exception->errors()),
+            'errores_por_campo' => $exception->errors(),
+        ]);
     }
 
     public function descargarIndividual(int $idCredencial): BinaryFileResponse
