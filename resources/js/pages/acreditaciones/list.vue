@@ -1399,7 +1399,8 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.contrato-credencial-table { min-inline-size: 980px; }
+.contrato-credencial-table { inline-size: 100%; min-inline-size: 0; }
+.contrato-credencial-table :deep(table) { min-inline-size: 980px; }
 .contrato-credencial-table th { white-space: nowrap; }
 .contrato-credencial-table td { white-space: nowrap; padding-block: 14px; }
 .acreditados-tipo-buscador { inline-size: 19rem !important; max-inline-size: 19rem !important; }
