@@ -1140,7 +1140,8 @@ onBeforeUnmount(() => {
           <VRow>
             <VCol
               cols="12"
-              :sm="!loadingResumen && hayCredencialesDigitales ? 4 : 6"
+              :sm="!loadingResumen && hayCredencialesDigitales ? 6 : 12"
+              md="4"
             >
               <VCard
                 variant="tonal"
@@ -1166,7 +1167,8 @@ onBeforeUnmount(() => {
             </VCol>
             <VCol
               cols="12"
-              :sm="!loadingResumen && hayCredencialesDigitales ? 4 : 6"
+              :sm="!loadingResumen && hayCredencialesDigitales ? 6 : 12"
+              md="4"
             >
               <VCard
                 variant="tonal"
@@ -1245,7 +1247,8 @@ onBeforeUnmount(() => {
             <VCol
               v-if="!loadingResumen && hayCredencialesDigitales"
               cols="12"
-              sm="4"
+              sm="6"
+              md="4"
             >
               <VCard
                 variant="tonal"
@@ -1288,6 +1291,18 @@ onBeforeUnmount(() => {
               </VCard>
             </VCol>
           </VRow>
+          <VAlert
+            type="warning"
+            variant="tonal"
+            class="acreditacion-guia-foto mt-4"
+          >
+            <div class="text-subtitle-2 font-weight-bold mb-1">
+              Requisito de la fotografía
+            </div>
+            <div>
+              Cuando se solicite una foto, asegúrese de que muestre claramente el rostro de la persona acreditada. No cargue logotipos, objetos ni imágenes de terceros. Las fotos que no permitan identificar al titular o incumplan este requisito pueden ocasionar la anulación de la credencial y la liberación del cupo para reasignarlo.
+            </div>
+          </VAlert>
           <VAlert
             type="warning"
             variant="tonal"
@@ -1668,7 +1683,8 @@ onBeforeUnmount(() => {
 .acreditacion-acciones { margin-inline-start: auto; }
 .acreditacion-dialog-card { overflow: hidden; border-radius: 16px; }
 .acreditacion-guia-card { overflow: hidden; border-radius: 16px; text-align: left; }
-.acreditacion-guia-card p, .acreditacion-guia-card .text-body-2, .acreditacion-guia-card :deep(.v-alert__content) { text-align: justify; }
+.acreditacion-guia-card p, .acreditacion-guia-card .text-body-2, .acreditacion-guia-card :deep(.v-alert__content) { text-align: justify; text-justify: inter-word; hyphens: none; word-break: normal; overflow-wrap: normal; }
+.acreditacion-guia-foto :deep(.v-alert__content) { inline-size: 100%; }
 .acreditacion-guia-paso { min-block-size: 100%; }
 .acreditacion-guia-ejemplo { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 12px; background: rgba(var(--v-theme-surface), .7); }
 .acreditacion-guia-ejemplo--masiva { align-items: stretch; }
