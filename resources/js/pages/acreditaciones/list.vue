@@ -18,12 +18,14 @@ const paginasTipo = ref({})
 const tiposAbiertos = ref([])
 const elementosPorPagina = ref(10)
 const dialogAcreditar = ref(false)
+const dialogGuiaAcreditacion = ref(false)
 const tipoSeleccionado = ref(null)
 const asignacionSeleccionada = ref('')
 const credencialesSeleccionadas = ref([])
 const dialogConflicto = ref(false)
 const expositorConflicto = ref(null)
 const guardando = ref(false)
+const descargaEnCurso = ref(null)
 const comprimiendoFoto = ref(false)
 const errorFormulario = ref('')
 const erroresCampos = ref({})
@@ -37,6 +39,7 @@ const inputFoto = ref(null)
 const tamanoMaximoFoto = 2 * 1024 * 1024
 let actualizacionTimer = null
 let solicitudResumen = 0
+let inicializandoPagina = true
 
 const codigosPais = [
   { title: 'Bolivia (+591)', value: '591' },
@@ -76,6 +79,7 @@ const celularFormateado = computed(() => `+${formulario.value.codigoPais}${numer
 
 const empresa = computed(() => auth.user)
 const eventoActual = computed(() => eventos.value.find(evento => evento.id_feria === eventoSeleccionado.value))
+const claveGuiaAcreditacion = computed(() => `plataforma:acreditaciones:guia:v1:${empresa.value?.id_empresa || 'empresa'}`)
 
 const asignacionesDisponibles = computed(() => (tipoSeleccionado.value?.registros || [])
   .filter(registro => Number(registro.credenciales_disponibles || 0) > 0)
@@ -118,8 +122,14 @@ const tiposVisibles = computed(() => tipos.value.flatMap(tipo => {
 }))
 const sinEventos = computed(() => !loadingEventos.value && eventos.value.length === 0)
 const sinCredenciales = computed(() => !loadingResumen.value && Boolean(eventoSeleccionado.value) && tiposVisibles.value.length === 0)
-const hayCredencialesFisicas = computed(() => tipos.value.some(tipo => tipo.registros?.some(registro => String(registro.modalidad_credencial || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').startsWith('fis'))))
-const hayCredencialesDigitales = computed(() => tipos.value.some(tipo => tipo.registros?.some(registro => String(registro.modalidad_credencial || '').toLowerCase().startsWith('dig'))))
+
+const registrosConCredenciales = computed(() => tipos.value
+  .flatMap(tipo => tipo.registros || [])
+  .filter(registro => Number(registro.credenciales_asignadas || 0) > 0 || Number(registro.credenciales_utilizadas || 0) > 0))
+
+const modalidadNormalizada = modalidad => String(modalidad || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+const hayCredencialesFisicas = computed(() => registrosConCredenciales.value.some(registro => modalidadNormalizada(registro.modalidad_credencial).startsWith('fis')))
+const hayCredencialesDigitales = computed(() => registrosConCredenciales.value.some(registro => modalidadNormalizada(registro.modalidad_credencial).startsWith('dig')))
 
 const totales = computed(() => tipos.value.reduce((total, tipo) => ({
   asignadas: total.asignadas + Number(tipo.asignadas || 0),
@@ -205,6 +215,15 @@ const cargarEventos = async () => {
   }
 }
 
+const cerrarGuiaAcreditacion = () => {
+  dialogGuiaAcreditacion.value = false
+  try {
+    localStorage.setItem(claveGuiaAcreditacion.value, 'vista')
+  } catch (exception) {
+    console.error('No se pudo guardar la preferencia de la guía de acreditación.', exception)
+  }
+}
+
 const tipoAbierto = tipo => tiposAbiertos.value.includes(tipo)
 const tipoTieneDisponibles = tipo => tipo.registros?.some(registro => Number(registro.credenciales_disponibles ?? tipo.disponibles ?? 0) > 0) ?? false
 
@@ -282,7 +301,28 @@ const alternarTodos = (tipo, seleccionado) => {
     : credencialesSeleccionadas.value.filter(id => !ids.includes(id))
 }
 
+const iniciarDescargaDesdeRespuesta = async (response, firma, nombreArchivo, mensajeInvalido) => {
+  const archivo = await response.blob()
+  const primerosBytes = new Uint8Array(await archivo.slice(0, firma.length).arrayBuffer())
+  if (!firma.every((byte, indice) => primerosBytes[indice] === byte))
+    throw new Error(mensajeInvalido)
+
+  const urlBlob = URL.createObjectURL(archivo)
+  const enlace = document.createElement('a')
+
+  enlace.href = urlBlob
+  enlace.download = nombreArchivo
+  document.body.appendChild(enlace)
+  enlace.click()
+  enlace.remove()
+  setTimeout(() => URL.revokeObjectURL(urlBlob), 1000)
+}
+
 const descargarIndividual = async idCredencial => {
+  if (descargaEnCurso.value) return
+
+  descargaEnCurso.value = { tipo: 'individual', idCredencial }
+  error.value = ''
   try {
     const response = await fetch(`/acreditaciones/credenciales/${idCredencial}/descargar`, {
       headers: { Accept: 'image/png', 'X-Requested-With': 'XMLHttpRequest' },
@@ -290,41 +330,34 @@ const descargarIndividual = async idCredencial => {
     })
 
     const contentType = response.headers.get('content-type') || ''
-    if (!response.ok || response.redirected || !contentType.includes('image/png')) {
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}))
+      throw new Error(payload.message || 'No se pudo descargar la credencial digital.')
+    }
+    if (response.redirected || !contentType.includes('image/png')) {
       throw new Error('La sesión expiró o el servidor no devolvió una imagen PNG válida.')
     }
 
-    const bytesRespuesta = new Uint8Array(await response.arrayBuffer())
-    const firmaPng = [137, 80, 78, 71, 13, 10, 26, 10]
-    let inicioPng = -1
-    for (let indice = 0; indice <= bytesRespuesta.length - firmaPng.length; indice++) {
-      if (firmaPng.every((byte, offset) => bytesRespuesta[indice + offset] === byte)) {
-        inicioPng = indice
-        break
-      }
-    }
-    if (inicioPng < 0) throw new Error('El servidor no devolvió una imagen PNG válida.')
-
-    const archivo = new Blob([bytesRespuesta.slice(inicioPng)], { type: 'image/png' })
-    const urlBlob = URL.createObjectURL(archivo)
-    const enlace = document.createElement('a')
-
-    enlace.href = urlBlob
-    enlace.download = `credencial-${idCredencial}.png`
-    document.body.appendChild(enlace)
-    enlace.click()
-    enlace.remove()
-    setTimeout(() => URL.revokeObjectURL(urlBlob), 1000)
+    await iniciarDescargaDesdeRespuesta(
+      response,
+      [137, 80, 78, 71, 13, 10, 26, 10],
+      `credencial-${idCredencial}.png`,
+      'El servidor no devolvió una imagen PNG válida.',
+    )
   } catch (exception) {
     error.value = exception.message
+  } finally {
+    descargaEnCurso.value = null
   }
 }
 
 const descargarSeleccionadas = async tipo => {
   const seleccionadas = seleccionadosDeTipo(tipo).map(acreditado => acreditado.id_credencial)
 
-  if (!seleccionadas.length) return
+  if (!seleccionadas.length || descargaEnCurso.value) return
 
+  descargaEnCurso.value = { tipo: 'masiva' }
+  error.value = ''
   try {
     const csrfToken = await refreshCsrfToken()
     if (!csrfToken)
@@ -346,31 +379,18 @@ const descargarSeleccionadas = async tipo => {
       throw new Error(payload.message || 'No se pudo descargar el archivo ZIP.')
     }
 
-    const bytesRespuesta = new Uint8Array(await response.arrayBuffer())
-    const firmaZip = [0x50, 0x4b, 0x03, 0x04]
-    let inicioZip = -1
-    for (let indice = 0; indice <= bytesRespuesta.length - firmaZip.length; indice++) {
-      if (firmaZip.every((byte, offset) => bytesRespuesta[indice + offset] === byte)) {
-        inicioZip = indice
-        break
-      }
-    }
-    if (inicioZip < 0) throw new Error('El servidor no devolvió un archivo ZIP válido.')
-
-    const archivo = new Blob([bytesRespuesta.slice(inicioZip)], { type: 'application/zip' })
-    const urlBlob = URL.createObjectURL(archivo)
-    const enlace = document.createElement('a')
-
-    enlace.href = urlBlob
-    enlace.download = 'credenciales-digitales.zip'
-    document.body.appendChild(enlace)
-    enlace.click()
-    enlace.remove()
-    setTimeout(() => URL.revokeObjectURL(urlBlob), 1000)
+    await iniciarDescargaDesdeRespuesta(
+      response,
+      [0x50, 0x4b, 0x03, 0x04],
+      'credenciales-digitales.zip',
+      'El servidor no devolvió un archivo ZIP válido.',
+    )
 
     credencialesSeleccionadas.value = credencialesSeleccionadas.value.filter(id => !seleccionadas.includes(id))
   } catch (exception) {
     error.value = exception.message
+  } finally {
+    descargaEnCurso.value = null
   }
 }
 
@@ -642,9 +662,21 @@ const guardarAcreditado = async () => {
   }
 }
 
-watch(eventoSeleccionado, idFeria => cargarResumen(idFeria))
+watch(eventoSeleccionado, idFeria => {
+  if (!inicializandoPagina)
+    cargarResumen(idFeria)
+}, { flush: 'sync' })
 onMounted(async () => {
   await cargarEventos()
+  if (eventoSeleccionado.value)
+    await cargarResumen(eventoSeleccionado.value)
+  inicializandoPagina = false
+  try {
+    dialogGuiaAcreditacion.value = localStorage.getItem(claveGuiaAcreditacion.value) !== 'vista'
+  } catch (exception) {
+    console.error('No se pudo consultar la preferencia de la guía de acreditación.', exception)
+    dialogGuiaAcreditacion.value = true
+  }
   actualizacionTimer = window.setInterval(() => {
     if (eventoSeleccionado.value && !loadingResumen.value && !document.hidden)
       cargarResumen(eventoSeleccionado.value, false)
@@ -775,9 +807,19 @@ onBeforeUnmount(() => {
           Si sus credenciales son digitales, puede descargarlas desde esta pantalla. También puede seleccionar todas y enviarlas por correo electrónico; revise su bandeja de entrada y la carpeta de Spam.
         </VAlert>
       </div>
-      <h5 class="text-h5 mb-4">
-        Tipos de credencial
-      </h5>
+      <div class="d-flex align-center justify-space-between flex-wrap gap-3 mb-4">
+        <h5 class="text-h5 mb-0">
+          Tipos de credencial
+        </h5>
+        <VBtn
+          variant="tonal"
+          color="primary"
+          prepend-icon="tabler-help-circle"
+          @click="dialogGuiaAcreditacion = true"
+        >
+          Cómo acreditar y descargar
+        </VBtn>
+      </div>
       <VCard
         v-if="loadingResumen"
         class="pa-5 mb-4"
@@ -899,6 +941,8 @@ onBeforeUnmount(() => {
                   size="small"
                   variant="flat"
                   prepend-icon="tabler-file-download"
+                  :disabled="Boolean(descargaEnCurso)"
+                  :loading="descargaEnCurso?.tipo === 'masiva'"
                   @click="descargarSeleccionadas(tipo)"
                 >
                   Descargar Seleccionadas
@@ -1015,6 +1059,8 @@ onBeforeUnmount(() => {
                       variant="flat"
                       color="primary"
                       prepend-icon="tabler-download"
+                      :disabled="Boolean(descargaEnCurso)"
+                      :loading="descargaEnCurso?.tipo === 'individual' && descargaEnCurso.idCredencial === acreditado.id_credencial"
                       @click="descargarIndividual(acreditado.id_credencial)"
                     >
                       Descargar credencial digital
@@ -1047,6 +1093,221 @@ onBeforeUnmount(() => {
         </VExpandTransition>
       </VCard>
     </template>
+    <VDialog
+      :model-value="Boolean(descargaEnCurso)"
+      persistent
+      max-width="420"
+    >
+      <VCard>
+        <VCardText class="d-flex flex-column align-center text-center pa-8">
+          <VProgressCircular
+            indeterminate
+            color="primary"
+            size="48"
+            width="4"
+          />
+          <div class="text-h6 mt-5">
+            {{ descargaEnCurso?.tipo === 'masiva' ? 'Preparando tus credenciales digitales' : 'Preparando tu credencial digital' }}
+          </div>
+          <div class="text-body-2 text-medium-emphasis mt-2">
+            Esto puede tardar unos segundos. La descarga comenzará automáticamente.
+          </div>
+        </VCardText>
+      </VCard>
+    </VDialog>
+    <VDialog
+      :model-value="dialogGuiaAcreditacion"
+      persistent
+      scrollable
+      max-width="900"
+    >
+      <VCard class="acreditacion-guia-card">
+        <VCardTitle class="acreditacion-dialog-header d-flex align-center pa-5">
+          <div class="acreditacion-dialog-icon me-3">
+            <VIcon icon="tabler-id-badge-2" />
+          </div>
+          <div class="grow">
+            <div class="text-h5 font-weight-bold">
+              Guía rápida de acreditación
+            </div>
+            <div class="text-body-2 text-medium-emphasis mt-1">
+              Acredite a sus expositores y gestione sus credenciales desde esta pantalla.
+            </div>
+          </div>
+        </VCardTitle>
+        <VDivider />
+        <VCardText class="pa-5">
+          <VRow>
+            <VCol
+              cols="12"
+              :sm="!loadingResumen && hayCredencialesDigitales ? 4 : 6"
+            >
+              <VCard
+                variant="tonal"
+                color="primary"
+                class="acreditacion-guia-paso h-100"
+              >
+                <VCardText>
+                  <VAvatar
+                    color="primary"
+                    variant="flat"
+                    class="mb-3"
+                  >
+                    <VIcon icon="tabler-user-plus" />
+                  </VAvatar>
+                  <div class="text-h6 mb-2">
+                    1. Acredite
+                  </div>
+                  <p class="text-body-2 mb-0">
+                    Elija el evento y el tipo con cupos. Pulse <strong>Agregar acreditado</strong>, busque por CI, complete los datos y la foto si se solicita; luego pulse <strong>Acreditar expositor</strong>.
+                  </p>
+                </VCardText>
+              </VCard>
+            </VCol>
+            <VCol
+              cols="12"
+              :sm="!loadingResumen && hayCredencialesDigitales ? 4 : 6"
+            >
+              <VCard
+                variant="tonal"
+                color="success"
+                class="acreditacion-guia-paso h-100"
+              >
+                <VCardText>
+                  <VAvatar
+                    color="success"
+                    variant="flat"
+                    class="mb-3"
+                  >
+                    <VIcon icon="tabler-download" />
+                  </VAvatar>
+                  <div class="text-h6 mb-2">
+                    2. Reciba su credencial
+                  </div>
+                  <p class="text-body-2 mb-3">
+                    <template v-if="loadingResumen">
+                      Consultando las modalidades asignadas a este evento...
+                    </template>
+                    <template v-else-if="hayCredencialesDigitales || hayCredencialesFisicas">
+                      La entrega depende de la modalidad asignada:
+                    </template>
+                    <template v-else>
+                      No hay credenciales asignadas para este evento.
+                    </template>
+                  </p>
+                  <div
+                    v-if="!loadingResumen"
+                    class="acreditacion-guia-modalidad"
+                  >
+                    <div v-if="hayCredencialesDigitales">
+                      <VChip
+                        color="success"
+                        size="small"
+                        label
+                      >
+                        Digital
+                      </VChip>
+                      <p class="text-body-2 mb-2">
+                        Descárguela desde su fila. Puede imprimirla o mostrarla desde su celular; usted decide.
+                      </p>
+                      <div class="acreditacion-guia-ejemplo">
+                        <VBtn
+                          size="x-small"
+                          color="primary"
+                          variant="flat"
+                          prepend-icon="tabler-download"
+                          tabindex="-1"
+                        >
+                          Descargar credencial digital
+                        </VBtn>
+                      </div>
+                    </div>
+                    <VDivider
+                      v-if="hayCredencialesDigitales && hayCredencialesFisicas"
+                      class="my-3"
+                    />
+                    <div v-if="hayCredencialesFisicas">
+                      <VChip
+                        color="warning"
+                        size="small"
+                        label
+                      >
+                        Física
+                      </VChip>
+                      <p class="text-body-2 mt-2 mb-0">
+                        Coordine previamente con el encargado para recogerla en las oficinas. No se descarga desde la plataforma.
+                      </p>
+                    </div>
+                  </div>
+                </VCardText>
+              </VCard>
+            </VCol>
+            <VCol
+              v-if="!loadingResumen && hayCredencialesDigitales"
+              cols="12"
+              sm="4"
+            >
+              <VCard
+                variant="tonal"
+                color="info"
+                class="acreditacion-guia-paso h-100"
+              >
+                <VCardText>
+                  <VAvatar
+                    color="info"
+                    variant="flat"
+                    class="mb-3"
+                  >
+                    <VIcon icon="tabler-files" />
+                  </VAvatar>
+                  <div class="text-h6 mb-2">
+                    3. Descargue varias
+                  </div>
+                  <p class="text-body-2 mb-3">
+                    Marque las credenciales digitales y pulse <strong>Descargar Seleccionadas</strong> para recibirlas en un ZIP.
+                  </p>
+                  <div class="acreditacion-guia-ejemplo acreditacion-guia-ejemplo--masiva">
+                    <VCheckbox
+                      model-value
+                      label="Acreditado digital"
+                      density="compact"
+                      hide-details
+                      disabled
+                    />
+                    <VBtn
+                      size="x-small"
+                      color="primary"
+                      variant="flat"
+                      prepend-icon="tabler-file-download"
+                      tabindex="-1"
+                    >
+                      Descargar Seleccionadas
+                    </VBtn>
+                  </div>
+                </VCardText>
+              </VCard>
+            </VCol>
+          </VRow>
+          <VAlert
+            type="warning"
+            variant="tonal"
+            class="mt-3"
+          >
+            Cada credencial es personal e intransferible. Si se detectan anomalías, mal uso o suplantación de identidad, podrá ser decomisada y anulada.
+          </VAlert>
+        </VCardText>
+        <VDivider />
+        <VCardActions class="pa-5 justify-end">
+          <VBtn
+            color="primary"
+            variant="flat"
+            @click="cerrarGuiaAcreditacion"
+          >
+            Entendido
+          </VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
     <VDialog
       v-model="dialogAcreditar"
       max-width="640"
@@ -1406,6 +1667,11 @@ onBeforeUnmount(() => {
 .acreditados-tipo-buscador { inline-size: 19rem !important; max-inline-size: 19rem !important; }
 .acreditacion-acciones { margin-inline-start: auto; }
 .acreditacion-dialog-card { overflow: hidden; border-radius: 16px; }
+.acreditacion-guia-card { overflow: hidden; border-radius: 16px; text-align: left; }
+.acreditacion-guia-card p, .acreditacion-guia-card .text-body-2, .acreditacion-guia-card :deep(.v-alert__content) { text-align: justify; }
+.acreditacion-guia-paso { min-block-size: 100%; }
+.acreditacion-guia-ejemplo { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; padding: 12px; border: 1px solid rgba(var(--v-theme-on-surface), .12); border-radius: 12px; background: rgba(var(--v-theme-surface), .7); }
+.acreditacion-guia-ejemplo--masiva { align-items: stretch; }
 .acreditacion-dialog-header { background: linear-gradient(135deg, rgba(var(--v-theme-primary), .11), rgba(var(--v-theme-primary), .04)); }
 .acreditacion-dialog-icon { display: inline-flex; align-items: center; justify-content: center; inline-size: 44px; block-size: 44px; border-radius: 12px; background: rgba(var(--v-theme-primary), .16); color: rgb(var(--v-theme-primary)); }
 .acreditacion-dialog-body { background: rgba(var(--v-theme-on-surface), .01); }

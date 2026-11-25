@@ -6,7 +6,9 @@ use App\Models\Empresa;
 use App\Support\RegistrarDescargaCredencial;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -113,6 +115,24 @@ class AcreditacionTest extends TestCase
             $table->text('usuario_empresa')->nullable();
             $table->string('tipo_descarga', 20);
             $table->timestamp('created_at');
+        });
+        Schema::create('credencial_qr_tokens', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedInteger('id_credencial');
+            $table->string('token_hash', 64)->unique();
+            $table->text('token_cifrado');
+            $table->unsignedInteger('version');
+            $table->boolean('activo')->default(true);
+            $table->timestamp('revocado_at')->nullable();
+            $table->string('motivo_revocacion', 50)->nullable();
+            $table->timestamps();
+            $table->unique(['id_credencial', 'version']);
+        });
+        Schema::create('credencial_tipo_diseno', function (Blueprint $table) {
+            $table->id();
+            $table->unsignedInteger('id_feria');
+            $table->string('tipo_credencial');
+            $table->string('ruta');
         });
         Schema::create('stands', function (Blueprint $table) {
             $table->increments('id_stand');
@@ -231,6 +251,146 @@ class AcreditacionTest extends TestCase
         ]);
     }
 
+    public function test_individual_download_does_not_create_a_qr_token(): void
+    {
+        DB::table('credenciales')->where('id_credencial', 1)->update(['modalidad_credencial' => 1]);
+
+        $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->getJson('/acreditaciones/credenciales/1/descargar')
+            ->assertUnprocessable()
+            ->assertJsonPath('message', 'La credencial no tiene un QR activo. Genere o asigne el QR desde intranetfexco.');
+
+        $this->assertDatabaseCount('credencial_qr_tokens', 0);
+    }
+
+    public function test_individual_download_does_not_revoke_an_unreadable_qr_token(): void
+    {
+        DB::table('credenciales')->where('id_credencial', 1)->update(['modalidad_credencial' => 1]);
+        DB::table('credencial_qr_tokens')->insert([
+            'id' => 1,
+            'id_credencial' => 1,
+            'token_hash' => hash('sha256', 'existing-qr-token'),
+            'token_cifrado' => 'not-a-valid-encrypted-token',
+            'version' => 4,
+            'activo' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->getJson('/acreditaciones/credenciales/1/descargar')
+            ->assertServerError()
+            ->assertJsonPath('message', 'No se pudo recuperar el QR asignado. La credencial no fue modificada; verifique la clave de cifrado compartida con intranetfexco.');
+
+        $this->assertDatabaseHas('credencial_qr_tokens', [
+            'id' => 1,
+            'token_hash' => hash('sha256', 'existing-qr-token'),
+            'token_cifrado' => 'not-a-valid-encrypted-token',
+            'version' => 4,
+            'activo' => true,
+            'revocado_at' => null,
+        ]);
+        $this->assertDatabaseCount('credencial_qr_tokens', 1);
+    }
+
+    public function test_bulk_download_does_not_revoke_an_unreadable_qr_token(): void
+    {
+        DB::table('credenciales')->where('id_credencial', 1)->update(['modalidad_credencial' => 1]);
+        DB::table('credencial_qr_tokens')->insert([
+            'id' => 1,
+            'id_credencial' => 1,
+            'token_hash' => hash('sha256', 'existing-qr-token'),
+            'token_cifrado' => 'not-a-valid-encrypted-token',
+            'version' => 4,
+            'activo' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+
+        $this->actingAs(Empresa::query()->findOrFail(1), 'empresa')
+            ->postJson('/acreditaciones/credenciales/descargar', [
+                'credenciales' => [1],
+                'archivo' => true,
+            ])
+            ->assertServerError();
+
+        $this->assertDatabaseHas('credencial_qr_tokens', [
+            'id' => 1,
+            'token_hash' => hash('sha256', 'existing-qr-token'),
+            'token_cifrado' => 'not-a-valid-encrypted-token',
+            'version' => 4,
+            'activo' => true,
+            'revocado_at' => null,
+        ]);
+        $this->assertDatabaseCount('credencial_qr_tokens', 1);
+    }
+
+    public function test_individual_and_bulk_downloads_reuse_the_existing_qr_token(): void
+    {
+        DB::table('credenciales')->where('id_credencial', 1)->update(['modalidad_credencial' => 1]);
+        $valorToken = 'crd-token-que-debe-conservarse';
+        $tokenCifrado = Crypt::encryptString($valorToken);
+        DB::table('credencial_qr_tokens')->insert([
+            'id' => 1,
+            'id_credencial' => 1,
+            'token_hash' => hash('sha256', $valorToken),
+            'token_cifrado' => $tokenCifrado,
+            'version' => 4,
+            'activo' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+        DB::table('credencial_tipo_diseno')->insert([
+            'id_feria' => 10,
+            'tipo_credencial' => 'Expositor',
+            'ruta' => 'test-credential-design.png',
+        ]);
+
+        $rutaDiseno = base_path('../intranetfexco/public/test-credential-design.png');
+        $imagen = imagecreatetruecolor(856, 1333);
+        ob_start();
+        imagepng($imagen);
+        $contenidoDiseno = (string) ob_get_clean();
+        imagedestroy($imagen);
+        File::partialMock()
+            ->shouldReceive('exists')
+            ->andReturnUsing(fn ($ruta) => $ruta === $rutaDiseno || is_file($ruta));
+        File::partialMock()
+            ->shouldReceive('get')
+            ->andReturnUsing(fn ($ruta) => $ruta === $rutaDiseno ? $contenidoDiseno : file_get_contents($ruta));
+
+        $empresa = Empresa::query()->findOrFail(1);
+        $this->actingAs($empresa, 'empresa')
+            ->get('/acreditaciones/credenciales/1/descargar')
+            ->assertOk()
+            ->assertHeader('content-type', 'image/png');
+
+        $this->assertDatabaseHas('credencial_qr_tokens', [
+            'id' => 1,
+            'token_hash' => hash('sha256', $valorToken),
+            'token_cifrado' => $tokenCifrado,
+            'version' => 4,
+            'activo' => true,
+        ]);
+
+        $this->actingAs($empresa, 'empresa')
+            ->postJson('/acreditaciones/credenciales/descargar', [
+                'credenciales' => [1],
+                'archivo' => true,
+            ])
+            ->assertOk()
+            ->assertHeader('content-type', 'application/zip');
+
+        $this->assertDatabaseHas('credencial_qr_tokens', [
+            'id' => 1,
+            'token_hash' => hash('sha256', $valorToken),
+            'token_cifrado' => $tokenCifrado,
+            'version' => 4,
+            'activo' => true,
+        ]);
+        $this->assertDatabaseCount('credencial_qr_tokens', 1);
+    }
+
     public function test_accreditation_uses_remaining_capacity_across_direct_assignments_of_same_type(): void
     {
         DB::table('expositores')->where('id_exp', 2)->update(['foto' => 'images/fotos/acreditado_existente.jpg']);
@@ -267,8 +427,15 @@ class AcreditacionTest extends TestCase
 
         $rutaFoto = DB::table('expositores')->where('ci', '99999')->value('foto');
         $filename = basename($rutaFoto);
+        $idExpositor = (int) DB::table('expositores')->where('ci', '99999')->value('id_exp');
+        $idCredencial = (int) DB::table('credenciales')->where('id_expositor', $idExpositor)->value('id_credencial');
+        $token = DB::table('credencial_qr_tokens')->where('id_credencial', $idCredencial)->first();
 
         $this->assertStringStartsWith('images/fotos/acreditado_', $rutaFoto);
+        $this->assertNotNull($token);
+        $this->assertTrue((bool) $token->activo);
+        $this->assertSame(1, (int) $token->version);
+        $this->assertSame(hash('sha256', Crypt::decryptString($token->token_cifrado)), $token->token_hash);
         Storage::disk('acreditados')->assertExists($filename);
         Storage::disk('acreditados_anterior')->assertMissing($filename);
     }

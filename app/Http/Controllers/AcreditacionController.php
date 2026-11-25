@@ -10,8 +10,10 @@ use App\Support\RegistrarDescargaCredencial;
 use chillerlan\QRCode\Output\QROutputInterface;
 use chillerlan\QRCode\QRCode;
 use chillerlan\QRCode\QROptions;
+use Illuminate\Contracts\Encryption\DecryptException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
@@ -25,6 +27,10 @@ use Symfony\Component\HttpFoundation\BinaryFileResponse;
 
 class AcreditacionController extends Controller
 {
+    private ?string $disenoCredencialCacheKey = null;
+
+    private ?string $disenoCredencialCacheContenido = null;
+
     public function __construct(
         private readonly EmpresaEventoAccess $empresaEventoAccess,
         private readonly RegistrarDescargaCredencial $registrarDescargaCredencial
@@ -528,6 +534,7 @@ class AcreditacionController extends Controller
 
                 $modalidad = $this->modalidadCredencialEvento($idFeria, $vinculacion->tipo_credenciales ?? $contrato->tipo_credenciales ?? null);
                 $idCredencial = DB::table('credenciales')->insertGetId(['cod_credencial' => 'ACR-'.$idFeria.'-'.($idContrato ?? 'D').'-'.$idExpositor.'-'.now()->format('YmdHis'), 'id_expositor' => $idExpositor, 'id_contrato' => $idContrato, 'id_empresa' => $empresa->id_empresa, 'id_feria' => $idFeria, 'com_medio' => '', 'com_dias' => '', 'tipo_credencial' => $tipoCodigo, 'modalidad_credencial' => $modalidad, 'estado_credencial' => 1, 'ingreso' => 0, 'created_at' => now(), 'updated_at' => now()]);
+                $this->crearTokenQr($idCredencial);
 
                 return ['id_expositor' => $idExpositor, 'id_credencial' => $idCredencial, 'foto' => $rutaFoto];
             });
@@ -596,7 +603,8 @@ class AcreditacionController extends Controller
             abort(422, 'Solo se pueden descargar credenciales digitales.');
         }
 
-        $contenido = $this->generarImagen($acreditado);
+        $token = $this->tokenQrActivo($idCredencial);
+        $contenido = $this->generarImagen($acreditado, $this->descifrarTokenQr($token));
         $directorio = storage_path('app/credenciales');
         File::ensureDirectoryExists($directorio);
         $nombreArchivo = 'credencial-'.Str::slug($acreditado->nombre ?: (string) $idCredencial).'-'.Str::uuid().'.png';
@@ -628,10 +636,22 @@ class AcreditacionController extends Controller
             'credenciales' => ['required', 'array', 'min:1', 'max:100'],
             'credenciales.*' => ['integer', 'distinct'],
         ]);
-        $acreditados = collect($datos['credenciales'])->map(fn (int $id) => $this->credencialAutorizada($id));
+        $acreditados = $this->credencialesAutorizadas($datos['credenciales']);
         if ($acreditados->contains(fn ($item) => (int) ($item->modalidad_credencial ?? 1) !== 1)) {
             abort(422, 'Solo se pueden descargar credenciales digitales.');
         }
+
+        $tokensQr = DB::table('credencial_qr_tokens')
+            ->whereIn('id_credencial', $acreditados->pluck('id_credencial'))
+            ->where('activo', true)
+            ->get()
+            ->keyBy('id_credencial');
+        if ($tokensQr->count() !== $acreditados->count()) {
+            abort(422, 'Una o más credenciales no tienen un QR activo. Genere o asigne los QR desde intranetfexco.');
+        }
+        $valoresQr = $tokensQr->mapWithKeys(fn ($token) => [
+            $token->id_credencial => $this->descifrarTokenQr($token),
+        ]);
 
         $directorio = $this->directorioDescargasEmpresa();
         File::ensureDirectoryExists($directorio);
@@ -649,7 +669,8 @@ class AcreditacionController extends Controller
                 $baseNombre = 'credencial-'.Str::slug($acreditado->nombre ?: (string) $acreditado->id_credencial);
                 $nombresUsados[$baseNombre] = ($nombresUsados[$baseNombre] ?? 0) + 1;
                 $nombreImagen = $baseNombre.($nombresUsados[$baseNombre] > 1 ? '-'.$nombresUsados[$baseNombre] : '').'.png';
-                if (! $zip->addFromString($nombreImagen, $this->generarImagen($acreditado))) {
+                $valorQr = $valoresQr->get($acreditado->id_credencial);
+                if (! $zip->addFromString($nombreImagen, $this->generarImagen($acreditado, $valorQr))) {
                     throw new \RuntimeException("No se pudo agregar la credencial {$acreditado->id_credencial} al ZIP.");
                 }
                 $this->registrarDescarga($acreditado->id_credencial, 'png_lote');
@@ -710,7 +731,9 @@ class AcreditacionController extends Controller
             }
 
             try {
-                $imagen = $this->generarImagen($acreditado);
+                $token = $this->tokenQrActivo((int) $acreditado->id_credencial);
+                $valorQr = $this->descifrarTokenQr($token);
+                $imagen = $this->generarImagen($acreditado, $valorQr);
                 EnviarCredencialDigitalJob::dispatch(
                     (int) $acreditado->id_credencial,
                     $correo,
@@ -761,26 +784,37 @@ class AcreditacionController extends Controller
 
     private function credencialAutorizada(int $id): object
     {
+        return $this->credencialesAutorizadas([$id])->first();
+    }
+
+    private function credencialesAutorizadas(array $ids): Collection
+    {
         $empresa = Auth::guard('empresa')->user();
-        $acreditado = DB::table('credenciales as c')
+        abort_unless($empresa, 401);
+
+        $acreditados = DB::table('credenciales as c')
             ->join('expositores as e', 'e.id_exp', '=', 'c.id_expositor')
             ->join('eventos as f', 'f.id_feria', '=', 'c.id_feria')
-            ->where('c.id_credencial', $id)
+            ->whereIn('c.id_credencial', $ids)
             ->where('c.id_empresa', $empresa->id_empresa)
             ->where('c.estado_credencial', '!=', 3)
             ->select('c.*', 'e.nombre', 'e.ci', 'e.exp', 'e.foto', 'e.email', 'e.com_email', 'f.nombre_feria', 'empresa.nombre_empresa')
             ->leftJoin('empresas as empresa', 'empresa.id_empresa', '=', 'c.id_empresa')
-            ->first();
-        if (! $acreditado) {
+            ->get()
+            ->keyBy('id_credencial');
+        if ($acreditados->count() !== count($ids)) {
             abort(404, 'La credencial no pertenece a la empresa autenticada.');
         }
 
-        $acreditado->modalidad_credencial = $this->modalidadCredencialEvento(
-            (int) $acreditado->id_feria,
-            $acreditado->modalidad_credencial
-        );
+        return collect($ids)->map(function (int $id) use ($acreditados) {
+            $acreditado = $acreditados->get($id);
+            $acreditado->modalidad_credencial = $this->modalidadCredencialEvento(
+                (int) $acreditado->id_feria,
+                $acreditado->modalidad_credencial
+            );
 
-        return $acreditado;
+            return $acreditado;
+        });
     }
 
     private function modalidadCredencialEvento(int $idFeria, int|string|null $modalidad): int
@@ -801,36 +835,75 @@ class AcreditacionController extends Controller
         );
     }
 
-    private function generarImagen(object $acreditado): string
+    private function crearTokenQr(int $idCredencial): void
     {
-        $tipo = match ((int) $acreditado->tipo_credencial) {
-            1 => 'Expositor', 2 => 'Prensa', 3 => 'Oficial', 4 => 'Servicios', 5 => 'Negocios', default => 'Expositor'
-        };
-        $diseno = DB::table('credencial_tipo_diseno')->where('id_feria', $acreditado->id_feria)->where('tipo_credencial', $tipo)->first();
+        $valor = 'crd_'.Str::lower(Str::random(48));
+        $version = (int) DB::table('credencial_qr_tokens')
+            ->where('id_credencial', $idCredencial)
+            ->max('version') + 1;
+
+        DB::table('credencial_qr_tokens')->insert([
+            'id_credencial' => $idCredencial,
+            'token_hash' => hash('sha256', $valor),
+            'token_cifrado' => Crypt::encryptString($valor),
+            'version' => $version,
+            'activo' => true,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
+    }
+
+    private function tokenQrActivo(int $idCredencial): object
+    {
+        $token = DB::table('credencial_qr_tokens')
+            ->where('id_credencial', $idCredencial)
+            ->where('activo', true)
+            ->first();
+        if (! $token) {
+            abort(422, 'La credencial no tiene un QR activo. Genere o asigne el QR desde intranetfexco.');
+        }
+
+        return $token;
+    }
+
+    private function descifrarTokenQr(object $token): string
+    {
+        try {
+            return Crypt::decryptString($token->token_cifrado);
+        } catch (DecryptException $exception) {
+            report($exception);
+            abort(500, 'No se pudo recuperar el QR asignado. La credencial no fue modificada; verifique la clave de cifrado compartida con intranetfexco.');
+        }
+    }
+
+    private function contenidoDisenoCredencial(int $idFeria, string $tipo): string
+    {
+        $cacheKey = $idFeria.':'.$tipo;
+        if ($this->disenoCredencialCacheKey === $cacheKey) {
+            return $this->disenoCredencialCacheContenido;
+        }
+
+        $diseno = DB::table('credencial_tipo_diseno')
+            ->where('id_feria', $idFeria)
+            ->where('tipo_credencial', $tipo)
+            ->first();
         $rutaDiseno = base_path('../intranetfexco/public/'.($diseno->ruta ?? ''));
         if (! $diseno || ! File::exists($rutaDiseno)) {
             abort(422, 'No existe el diseño de credencial para este evento.');
         }
 
-        $token = DB::table('credencial_qr_tokens')->where('id_credencial', $acreditado->id_credencial)->where('activo', true)->first();
-        $valor = null;
-        if ($token) {
-            try {
-                $valor = Crypt::decryptString($token->token_cifrado);
-            } catch (\Throwable) {
-                DB::table('credencial_qr_tokens')->where('id', $token->id)->update([
-                    'activo' => false,
-                    'revocado_at' => now(),
-                    'motivo_revocacion' => 'token_no_recuperable_plataforma',
-                    'updated_at' => now(),
-                ]);
-            }
-        }
-        if (! $valor) {
-            $valor = 'crd_'.Str::lower(Str::random(48));
-            $version = (int) DB::table('credencial_qr_tokens')->where('id_credencial', $acreditado->id_credencial)->max('version') + 1;
-            DB::table('credencial_qr_tokens')->insert(['id_credencial' => $acreditado->id_credencial, 'token_hash' => hash('sha256', $valor), 'token_cifrado' => Crypt::encryptString($valor), 'version' => $version, 'activo' => true, 'created_at' => now(), 'updated_at' => now()]);
-        }
+        $this->disenoCredencialCacheKey = $cacheKey;
+        $this->disenoCredencialCacheContenido = File::get($rutaDiseno);
+
+        return $this->disenoCredencialCacheContenido;
+    }
+
+    private function generarImagen(object $acreditado, string $valorQr): string
+    {
+        $tipo = match ((int) $acreditado->tipo_credencial) {
+            1 => 'Expositor', 2 => 'Prensa', 3 => 'Oficial', 4 => 'Servicios', 5 => 'Negocios', default => 'Expositor'
+        };
+
         $archivosTemporales = [];
         $rutaQr = storage_path('app/credenciales-qr-'.$acreditado->id_credencial.'-'.Str::uuid().'.png');
         $opcionesQr = new QROptions;
@@ -839,13 +912,13 @@ class AcreditacionController extends Controller
         $opcionesQr->scale = 8;
         set_error_handler(static fn () => true, E_DEPRECATED | E_USER_DEPRECATED);
         try {
-            File::put($rutaQr, (new QRCode($opcionesQr))->render($valor));
+            File::put($rutaQr, (new QRCode($opcionesQr))->render($valorQr));
         } finally {
             restore_error_handler();
         }
         $archivosTemporales[] = $rutaQr;
         try {
-            $fondo = @imagecreatefromstring((string) File::get($rutaDiseno));
+            $fondo = @imagecreatefromstring($this->contenidoDisenoCredencial((int) $acreditado->id_feria, $tipo));
             if (! $fondo) {
                 throw new \RuntimeException('No se pudo cargar el diseño de credencial.');
             }
